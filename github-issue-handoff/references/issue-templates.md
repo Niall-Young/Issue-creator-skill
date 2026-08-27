@@ -1,4 +1,4 @@
-# Agent-ready Issue templates
+# Agent-ready Issue handoff templates
 
 Choose exactly one template based on the primary deliverable. Preserve the headings so Issues remain scannable across projects. Replace the guidance with task-specific facts; do not leave instructional placeholders in the published Issue.
 
@@ -227,4 +227,3 @@ Title: `[Research] <描述需要回答的问题或决策>`
 
 - <相关 Issue、PR、文档或来源；没有则写“无”>
 ```
-

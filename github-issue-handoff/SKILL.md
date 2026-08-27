@@ -1,15 +1,15 @@
 ---
-name: github-issue-creator
-description: Turn a GitHub repository link and optional task description into a Chinese, agent-ready GitHub Issue. Use when the user wants to create or submit an Issue as a development TODO or clean-context handoff to another agent; do not trigger for ordinary GitHub browsing or link discussion.
+name: github-issue-handoff
+description: Turn a GitHub repository link and optional task description into a Chinese, agent-ready GitHub Issue handoff. Use when the user wants to create or submit an Issue that another agent can execute; do not trigger for ordinary GitHub browsing, link discussion, or implementing an existing Issue.
 ---
 
-# GitHub Issue Creator
+# GitHub Issue Handoff
 
 Create an Issue that a new agent can execute using only the Issue and the repository. The Issue is a task handoff, not a loose reminder: it must explain the outcome, verified repository context, boundaries, acceptance criteria, and validation.
 
 ## Authorization
 
-- An explicit invocation such as `$github-issue-creator <GitHub URL>` authorizes creating one ready Issue. An explicit request to create, submit, or file an Issue does the same.
+- An explicit invocation such as `$github-issue-handoff <GitHub URL>` authorizes creating one ready Issue. An explicit request to create, submit, or file an Issue does the same.
 - If the skill was selected implicitly, require clear Issue-creation intent. A GitHub link by itself outside an explicit skill invocation is not authorization.
 - If the user asks for a draft or preview, do not create the Issue.
 - One request containing multiple independently deliverable tasks requires split confirmation before creating multiple Issues.
