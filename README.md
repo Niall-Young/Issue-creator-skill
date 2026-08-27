@@ -37,7 +37,15 @@ Turn a GitHub repository link and task description into a Chinese, agent-ready G
 
 #### 安装
 
-克隆仓库后，将其中的 `github-issue-creator/` 技能目录复制到 `~/.claude/skills/`（或项目的 `.claude/skills/`），重新启动会话即可被发现：
+推荐将下面的提示词直接复制到你的 Agent 会话中，让 Agent 根据其运行环境完成安装：
+
+```text
+帮我安装这个 skill：https://github.com/Niall-Young/Issue-creator-skill
+```
+
+Agent 可能会根据运行环境请求必要的授权，或说明无法自动安装时的限制。
+
+如需手动安装，可克隆仓库，再将其中的 `github-issue-creator/` 技能目录复制到你的 Agent 运行时所使用的 skill 目录。以下命令以 Claude Code 的 `~/.claude/skills/` 为例；安装后请重新启动会话：
 
 ```sh
 git clone https://github.com/Niall-Young/Issue-creator-skill.git
@@ -123,7 +131,15 @@ This is a skill package for agent workflows, used by skill-capable runtimes such
 
 #### Install
 
-Clone the repository, then copy its `github-issue-creator/` skill directory into `~/.claude/skills/` (or a project's `.claude/skills/`). Restart the session for auto-discovery:
+For the easiest setup, copy the following prompt directly into your agent session and let the agent install the skill for its runtime:
+
+```text
+Please install this skill for me: https://github.com/Niall-Young/Issue-creator-skill
+```
+
+Depending on the runtime and its permissions, the agent may request authorization or explain why it cannot install the skill automatically.
+
+For manual installation, clone the repository and copy its `github-issue-creator/` directory into the skill directory used by your agent runtime. The commands below use Claude Code's `~/.claude/skills/` as an example; restart the session after installation:
 
 ```sh
 git clone https://github.com/Niall-Young/Issue-creator-skill.git
