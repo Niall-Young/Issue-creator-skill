@@ -1,5 +1,7 @@
 # GitHub Issue Creator
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 把 GitHub 仓库链接和任务描述整理成中文、Agent 可直接执行的 GitHub Issue。
 
 Turn a GitHub repository link and task description into a Chinese, agent-ready GitHub Issue.
