@@ -1,0 +1,7 @@
+interface:
+  display_name: "GitHub Issue Creator"
+  short_description: "把项目任务整理成 Agent 可直接执行的 GitHub Issue"
+  default_prompt: "Use $github-issue-creator to turn this GitHub link and my task description into an agent-ready Issue and submit it."
+
+policy:
+  allow_implicit_invocation: true
