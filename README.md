@@ -20,7 +20,7 @@ Turn a GitHub repository link and task description into a Chinese, agent-ready G
 ### 核心能力
 
 - 自动解析并校验仓库（owner/repo）与 Issues 可用性，不信任字符串解析
-- 按交付物类型（Feature / Bug / Refactor / Research）套用对应的 `references/issue-templates.md` 模板
+- 按交付物类型（Feature / Bug / Refactor / Research）套用对应的 `github-issue-creator/references/issue-templates.md` 模板
 - 可执行性门禁：任务目标、仓库上下文、范围、验收标准、验证方式缺一不可，无法确认的事实标注 `待确认`
 - 去重与安全检查：搜索已有 Issue，安全敏感报告改走仓库 Security Policy 的私有渠道
 - 保持原子性：一个 Issue 对应一个可独立验证的成果，多任务先拆分再确认
@@ -37,10 +37,11 @@ Turn a GitHub repository link and task description into a Chinese, agent-ready G
 
 #### 安装
 
-将本技能放入 `~/.claude/skills/`（或项目的 `.claude/skills/`），重新启动会话即可被发现：
+克隆仓库后，将其中的 `github-issue-creator/` 技能目录复制到 `~/.claude/skills/`（或项目的 `.claude/skills/`），重新启动会话即可被发现：
 
 ```sh
-git clone https://github.com/Niall-Young/Issue-creator-skill.git ~/.claude/skills/Issue-creator-skill
+git clone https://github.com/Niall-Young/Issue-creator-skill.git
+cp -R Issue-creator-skill/github-issue-creator ~/.claude/skills/github-issue-creator
 ```
 
 #### 运行
@@ -63,18 +64,20 @@ $github-issue-creator https://github.com/owner/repo 帮我排查登录接口偶�
 
 ### 配置
 
-- `agents/openai.yaml`：提供 OpenAI 兼容 Agent 的界面配置（显示名、默认提示词），并声明允许隐式调用。技能本身无需额外配置即可使用。
+- `github-issue-creator/agents/openai.yaml`：提供 OpenAI 兼容 Agent 的界面配置（显示名、默认提示词），并声明允许隐式调用。技能本身无需额外配置即可使用。
 
 ### 项目结构
 
 ```
 .
-├── SKILL.md                       # 技能定义与执行流程
 ├── LICENSE                        # MIT 许可证
-├── agents/
-│   └── openai.yaml                # OpenAI 兼容 Agent 界面配置
-└── references/
-    └── issue-templates.md         # Feature / Bug / Refactor / Research 模板
+├── README.md                      # 项目说明与安装文档
+└── github-issue-creator/          # 可独立安装的技能目录
+    ├── SKILL.md                   # 技能定义与执行流程
+    ├── agents/
+    │   └── openai.yaml            # OpenAI 兼容 Agent 界面配置
+    └── references/
+        └── issue-templates.md     # Feature / Bug / Refactor / Research 模板
 ```
 
 ### 开发与验证
@@ -103,7 +106,7 @@ This is a skill package for agent workflows, used by skill-capable runtimes such
 ### Features
 
 - Parses and validates the repository (owner/repo) and Issues availability, without trusting string parsing
-- Applies the matching `references/issue-templates.md` template by deliverable type (Feature / Bug / Refactor / Research)
+- Applies the matching `github-issue-creator/references/issue-templates.md` template by deliverable type (Feature / Bug / Refactor / Research)
 - Executability gate: task goal, repository context, scope, acceptance criteria, and validation are required; unverifiable facts are marked `待确认`
 - Deduplication and safety checks: searches existing Issues; security-sensitive reports go through the repository's private Security Policy channel
 - Keeps tasks atomic: one Issue per independently verifiable outcome; splits multi-task requests before confirmation
@@ -120,10 +123,11 @@ This is a skill package for agent workflows, used by skill-capable runtimes such
 
 #### Install
 
-Place this skill under `~/.claude/skills/` (or a project's `.claude/skills/`), then restart the session for auto-discovery:
+Clone the repository, then copy its `github-issue-creator/` skill directory into `~/.claude/skills/` (or a project's `.claude/skills/`). Restart the session for auto-discovery:
 
 ```sh
-git clone https://github.com/Niall-Young/Issue-creator-skill.git ~/.claude/skills/Issue-creator-skill
+git clone https://github.com/Niall-Young/Issue-creator-skill.git
+cp -R Issue-creator-skill/github-issue-creator ~/.claude/skills/github-issue-creator
 ```
 
 #### Run
@@ -146,18 +150,20 @@ Expected result: the skill produces a Chinese Issue from the Bug template, passe
 
 ### Configuration
 
-- `agents/openai.yaml`: provides the interface configuration for an OpenAI-compatible agent (display name, default prompt) and declares implicit invocation as allowed. The skill itself works without extra configuration.
+- `github-issue-creator/agents/openai.yaml`: provides the interface configuration for an OpenAI-compatible agent (display name, default prompt) and declares implicit invocation as allowed. The skill itself works without extra configuration.
 
 ### Project Structure
 
 ```
 .
-├── SKILL.md                       # Skill definition and workflow
 ├── LICENSE                        # MIT license
-├── agents/
-│   └── openai.yaml                # OpenAI-compatible agent interface config
-└── references/
-    └── issue-templates.md         # Feature / Bug / Refactor / Research templates
+├── README.md                      # Project documentation and installation guide
+└── github-issue-creator/          # Independently installable skill directory
+    ├── SKILL.md                   # Skill definition and workflow
+    ├── agents/
+    │   └── openai.yaml            # OpenAI-compatible agent interface config
+    └── references/
+        └── issue-templates.md     # Feature / Bug / Refactor / Research templates
 ```
 
 ### Development and Verification
