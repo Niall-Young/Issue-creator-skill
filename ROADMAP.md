@@ -9,14 +9,15 @@
 
 ### 产品边界
 
-项目保留两个权限独立、可组合的工作流：
+项目保留三个权限独立、可组合的工作流：
 
 - `github-issue-handoff`：把仓库上下文与用户意图交接成 Agent 可执行的 Issue。创建 Issue 不会自动触发代码修改。
 - `github-issue-repair`：读取既有 Issue，提出工作包与验证方案，在获得授权后修改代码，并可在再次授权后发布 draft PR。
+- `github-issue-autopilot`：按可信本地策略自动发现 owner 创建的新 Issue，并在全新 Agent 进程中调用 repair 工作流。
 
-两者可以共享 URL 解析、GitHub 读取、仓库上下文采集与结构化 Issue 数据，但必须拥有不同的触发条件、授权边界、状态与成功标准。
+三者可以共享 URL 解析、GitHub 读取、仓库上下文采集与结构化 Issue 数据，但必须拥有不同的触发条件、授权边界、状态与成功标准。
 
-当前仓库已包含两个 Skill、工作包契约、审批状态机和幂等运行账本。默认使用单 Issue、单工作包、串行闭环；Phase 4 的仓库级小批次与有限并发仍需用真实验收数据解锁。
+当前仓库已包含三个 Skill、工作包契约、审批状态机、修复账本和 SQLite 自动调度账本。单机轮询、单 Issue 串行自动领取已实现；仓库级小批次、多机协调、自动发布与有限并发仍需真实验收数据解锁。
 
 ### 核心原则
 
@@ -25,6 +26,7 @@
 - 协调器负责确定性的状态、依赖、预算、审批和恢复；Agent 只承担有边界的规划、实施与审查角色。
 - worker 使用隔离 worktree，不接触远程写凭据，也不修改用户正在使用的工作树。
 - 自动化可以准备证据和 draft PR，但 MVP 不自动合并、关闭 Issue、评论、打标签、发布或部署。
+- 新部署必须设置 `activate_after`，避免首次运行扫入历史 backlog；自动任务以 GitHub Issue node ID 幂等识别，Issue 编辑不会自动重跑。
 
 ### 分阶段计划
 
@@ -68,9 +70,16 @@
 
 验收：远程动作可追踪、可幂等恢复，不会因超时或未知回执重复创建 PR。
 
-#### Phase 4：小批次与有限并发
+#### Phase 4：自动领取、小批次与有限并发
 
-只有前述顺序流程在真实仓库中稳定后才开放：
+已完成的单机基础：
+
+- `github-issue-autopilot` 用 `gh` 只读轮询允许仓库，按作者、`activate_after` 与可选标签筛选。
+- SQLite WAL 账本用 node ID 去重、事务领取与租约恢复；每次执行启动 fresh Agent 进程，并在执行前复核 Issue 仍然符合策略。
+- 符合策略的 Issue 只预授权一个低/中风险本地工作包；远程发布固定为 `never`，merge 始终由人完成。
+- `launchd` 可定时运行 `once`；无有效 `AUTOPILOT_RESULT` 回执不得判定成功。
+
+只有上述串行流程在真实仓库中稳定后才继续开放：
 
 - 从仓库 URL 选择有上限的批次，用户确认后执行。
 - 根据 `blocked-by`、`duplicate-of`、`same-root-cause`、`conflicts-with` 与共享契约建立依赖图。
@@ -110,14 +119,15 @@
 
 ### Product Boundary
 
-Keep two composable workflows with separate permission surfaces:
+Keep three composable workflows with separate permission surfaces:
 
 - `github-issue-handoff`: turns repository context and user intent into an agent-ready Issue. Creating an Issue never triggers code changes.
 - `github-issue-repair`: reads an existing Issue, proposes work packages and verification, modifies code after approval, and may publish a draft PR after a separate publication authorization.
+- `github-issue-autopilot`: discovers new owner-authored Issues under trusted local policy and invokes the repair workflow in a fresh Agent process.
 
 They may share URL parsing, GitHub reads, repository context collection, and structured Issue data, but they must retain distinct triggers, authorization boundaries, state, and success criteria.
 
-The repository now includes both Skills, the work-package contract, approval state machine, and idempotent run ledger. The default is one Issue and one sequential package; Phase 4 repository batches and bounded concurrency still require real acceptance evidence before activation.
+The repository now includes all three Skills, the work-package contract, approval state machine, repair ledger, and SQLite dispatch ledger. Single-machine polling and sequential automatic claims are implemented; repository batches, multi-runner coordination, automatic publication, and bounded concurrency still require real acceptance evidence.
 
 ### Core Principles
 
@@ -126,6 +136,7 @@ The repository now includes both Skills, the work-package contract, approval sta
 - A deterministic coordinator owns state, dependencies, budgets, approvals, and recovery. Agents perform bounded planning, implementation, and review roles.
 - Workers use isolated worktrees, receive no remote-write credentials, and never modify the user's active working tree.
 - Automation may prepare evidence and draft PRs, but the MVP never merges, closes Issues, comments, labels, releases, or deploys automatically.
+- New deployments require `activate_after` so the first run cannot sweep an old backlog. Automatic jobs are idempotent by immutable GitHub Issue node ID; Issue edits do not retrigger work.
 
 ### Phased Plan
 
@@ -167,9 +178,16 @@ Exit criterion: runs resume safely, never contaminate the active worktree, and p
 
 Exit criterion: remote actions are traceable and resumable without duplicate PRs after timeouts or unknown receipts.
 
-#### Phase 4: Small batches and bounded concurrency
+#### Phase 4: Automatic claims, small batches, and bounded concurrency
 
-Enable this only after the sequential flow is reliable in real repositories.
+Implemented single-machine foundation:
+
+- `github-issue-autopilot` performs read-only `gh` polling on allowlisted repositories and filters by author, `activate_after`, and optional labels.
+- A SQLite WAL ledger deduplicates by node ID, claims transactionally, and recovers stale leases. Every run starts a fresh Agent process and revalidates eligibility before execution.
+- An eligible Issue pre-authorizes only one low/medium-risk local work package. Remote publication is fixed to `never`, and merge remains human-only.
+- `launchd` can schedule `once`; a run without a valid `AUTOPILOT_RESULT` receipt is never reported as success.
+
+Enable the following only after the sequential flow is reliable in real repositories:
 
 - Select a capped repository-level batch, then require user confirmation.
 - Build a graph using `blocked-by`, `duplicate-of`, `same-root-cause`, `conflicts-with`, and shared-contract relationships.
