@@ -68,6 +68,7 @@ $github-issue-creator https://github.com/owner/repo 帮我排查登录接口偶�
 ```
 .
 ├── SKILL.md                       # 技能定义与执行流程
+├── LICENSE                        # MIT 许可证
 ├── agents/
 │   └── openai.yaml                # OpenAI 兼容 Agent 界面配置
 └── references/
@@ -84,7 +85,7 @@ $github-issue-creator https://github.com/owner/repo 帮我排查登录接口偶�
 
 ### 许可证
 
-仓库未声明许可证。
+本项目使用 [MIT License](LICENSE)。
 
 [English](#english) · [返回顶部](#github-issue-creator)
 
@@ -150,6 +151,7 @@ Expected result: the skill produces a Chinese Issue from the Bug template, passe
 ```
 .
 ├── SKILL.md                       # Skill definition and workflow
+├── LICENSE                        # MIT license
 ├── agents/
 │   └── openai.yaml                # OpenAI-compatible agent interface config
 └── references/
@@ -166,6 +168,6 @@ This project has no automated tests. Verification is end-to-end via the GitHub C
 
 ### License
 
-No license is declared in the repository.
+This project is licensed under the [MIT License](LICENSE).
 
 [中文](#中文) · [Back to top](#github-issue-creator)
