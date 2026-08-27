@@ -1,0 +1,7 @@
+interface:
+  display_name: "GitHub Issue Repair"
+  short_description: "分诊并修复 GitHub Issue，验证后生成 draft PR"
+  default_prompt: "Use $github-issue-repair to analyze this GitHub Issue, propose a bounded repair plan, and implement it only after I approve the scope."
+
+policy:
+  allow_implicit_invocation: true

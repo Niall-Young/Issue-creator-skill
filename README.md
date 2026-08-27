@@ -1,10 +1,10 @@
-# GitHub Issue Handoff
+# GitHub Issue Workflow
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-把 GitHub 仓库链接和任务描述整理成中文、Agent 可直接接手的 GitHub Issue。
+创建 Agent 可直接接手的 GitHub Issue，并在授权后把既有 Issue 修复成经过验证的 draft PR。
 
-Turn a GitHub repository link and task description into a Chinese, agent-ready GitHub Issue handoff.
+Create agent-ready GitHub Issues and turn approved existing Issues into verified draft PRs.
 
 [中文](#中文) | [English](#english)
 
@@ -15,22 +15,18 @@ Turn a GitHub repository link and task description into a Chinese, agent-ready G
 
 ### 项目简介
 
-这是一个面向 Agent 工作流的技能包（Skill），供 Claude Code 等支持 skill 机制的运行时使用。它接收一条 GitHub 仓库链接和可选的任务描述，整理成一份结构完整、中文撰写、另一个 Agent 只凭 Issue 就能接手的 GitHub Issue。`Handoff` 强调它是一份经过验证的任务交接，而不只是创建一条记录。
-
-当前版本只负责创建和回读 Issue，不会读取既有 Issue 后自动修改代码。后续自动修复能力将作为权限独立的 `github-issue-repair` 工作流开发，详见 [演进计划](ROADMAP.md#中文)。
+这是一个面向 Agent 开发流程的技能包，包含两个权限独立、可组合的 Skill：`github-issue-handoff` 把仓库上下文和用户意图交接成可执行 Issue；`github-issue-repair` 读取既有 Issue，先提出工作包和验证方案，经用户批准后在隔离 worktree 中修改代码，并可在再次授权后生成 draft PR。
 
 从旧版本升级时，请删除运行时中的 `github-issue-creator/` 安装副本，再安装 `github-issue-handoff/`，并把显式调用改为 `$github-issue-handoff`，避免新旧技能同时被发现。
 
 ### 核心能力
 
-- 自动解析并校验仓库（owner/repo）与 Issues 可用性，不信任字符串解析
-- 按交付物类型（Feature / Bug / Refactor / Research）套用对应的 `github-issue-handoff/references/issue-templates.md` 模板
-- 可执行性门禁：任务目标、仓库上下文、范围、验收标准、验证方式缺一不可，无法确认的事实标注 `待确认`
-- 去重与安全检查：搜索已有 Issue，安全敏感报告改走仓库 Security Policy 的私有渠道
-- 保持原子性：一个 Issue 对应一个可独立验证的成果，多任务先拆分再确认
-- 创建后回读校验（`gh issue view`），确认标题与正文完整
-- Issue 文案全中文，代码、命令、路径、日志保持原文
-- 不擅自添加标签、指派、里程碑或项目
+- `github-issue-handoff`：校验仓库、检索重复项、套用 Feature / Bug / Refactor / Research 模板，通过可执行性门禁后创建并回读中文 Issue。
+- `github-issue-repair`：把 Issue 归一化为工作包，识别依赖、重复、同根因与冲突关系；仓库 URL 默认只做只读分诊。
+- 修复 worker 使用独立 worktree，不修改用户正在使用的工作树；MVP 串行执行，成熟批次最多并发 3 个低交互风险工作包。
+- 独立 reviewer 核对验收标准、验证证据、范围漂移和测试弱化。
+- 确定性账本记录 base/head SHA、计划、审批、状态迁移和远程回执，支持中断恢复与幂等发布。
+- 修改代码与发布 draft PR 分别经过授权门禁；不自动合并、关闭 Issue、评论、打标签、发布或部署。
 
 ### 快速开始
 
@@ -44,16 +40,17 @@ Turn a GitHub repository link and task description into a Chinese, agent-ready G
 推荐将下面的提示词直接复制到你的 Agent 会话中，让 Agent 根据其运行环境完成安装：
 
 ```text
-帮我安装这个 skill：https://github.com/Niall-Young/Issue-creator-skill
+帮我安装这个 skill 仓库中的两个技能：https://github.com/Niall-Young/github-issue-workflow
 ```
 
 Agent 可能会根据运行环境请求必要的授权，或说明无法自动安装时的限制。
 
-如需手动安装，可克隆仓库，再将其中的 `github-issue-handoff/` 技能目录复制到你的 Agent 运行时所使用的 skill 目录。以下命令以 Claude Code 的 `~/.claude/skills/` 为例；安装后请重新启动会话：
+如需手动安装，可克隆仓库，再将两个技能目录复制到 Agent 运行时的 skill 目录。以下命令以 Claude Code 的 `~/.claude/skills/` 为例；安装后请重新启动会话：
 
 ```sh
-git clone https://github.com/Niall-Young/Issue-creator-skill.git
-cp -R Issue-creator-skill/github-issue-handoff ~/.claude/skills/github-issue-handoff
+git clone https://github.com/Niall-Young/github-issue-workflow.git
+cp -R github-issue-workflow/github-issue-handoff ~/.claude/skills/github-issue-handoff
+cp -R github-issue-workflow/github-issue-repair ~/.claude/skills/github-issue-repair
 ```
 
 #### 运行
@@ -62,6 +59,8 @@ cp -R Issue-creator-skill/github-issue-handoff ~/.claude/skills/github-issue-han
 
 ```sh
 $github-issue-handoff <GitHub URL>
+$github-issue-repair <GitHub Issue URL>
+$github-issue-repair <GitHub Repository URL>
 ```
 
 ### 使用方法
@@ -74,9 +73,18 @@ $github-issue-handoff https://github.com/owner/repo 帮我排查登录接口偶�
 
 预期结果：技能按 Bug 模板生成一份中文 Issue，通过创建前门禁与去重检查后提交，并返回标题与可点击的 Issue URL。若仓库存在安全风险，则按 Security Policy 走私有上报渠道，不创建公开 Issue。
 
+修复一条既有 Issue：
+
+```sh
+$github-issue-repair https://github.com/owner/repo/issues/123
+```
+
+预期结果：技能先只读分析并展示工作包、base SHA、风险、预算和验证方案。用户批准后才允许本地修改；用户检查 diff 与证据并授权发布后，才允许 push 和创建 draft PR。仅提供仓库 URL 时，技能只输出有限候选批次，不会自动修复所有 Issue。
+
 ### 配置
 
-- `github-issue-handoff/agents/openai.yaml`：提供 OpenAI 兼容 Agent 的界面配置（显示名、默认提示词），并声明允许隐式调用。技能本身无需额外配置即可使用。
+- 两个 Skill 的 `agents/openai.yaml` 提供 OpenAI 兼容 Agent 的界面配置并允许自动发现；自动发现不构成修改代码或远程写入授权。
+- `github-issue-repair/scripts/run_state.py` 使用 Python 标准库，在仓库 Git 公共目录中维护运行账本，无需额外依赖。
 
 ### 项目结构
 
@@ -85,31 +93,40 @@ $github-issue-handoff https://github.com/owner/repo 帮我排查登录接口偶�
 ├── LICENSE                        # MIT 许可证
 ├── README.md                      # 项目说明与安装文档
 ├── ROADMAP.md                     # Issue 创建到修复的分阶段计划
-└── github-issue-handoff/          # 可独立安装的技能目录
-    ├── SKILL.md                   # 技能定义与执行流程
-    ├── agents/
-    │   └── openai.yaml            # OpenAI 兼容 Agent 界面配置
-    └── references/
-        └── issue-templates.md     # Feature / Bug / Refactor / Research 模板
+├── github-issue-handoff/          # Issue 创建与交接 Skill
+├── github-issue-repair/           # Issue 分诊与修复 Skill
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/repair-contract.md
+│   └── scripts/run_state.py       # 状态、审批与回执账本
+└── tests/test_run_state.py        # 账本单元测试
 ```
 
 ### 开发与验证
 
-本项目当前无自动化测试。验证通过 GitHub CLI 端到端进行：
+运行自动化测试和 Skill 校验：
+
+```sh
+python3 -m unittest discover -s tests -v
+python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
+python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
+```
+
+真实 GitHub 操作还需通过 CLI 端到端回读：
 
 - `gh repo view` 校验仓库信息与 Issues 可用性
 - `gh issue create` 提交 Issue（正文经 stdin 或临时文件传递）
 - `gh issue view` 回读并核对提交结果
 
-### 下一阶段
+### 成熟度
 
-新增独立的 `github-issue-repair`，先完成单 Issue、单工作包、串行执行的安全闭环，再根据真实验收数据逐步开放仓库级分诊和有限并发。Issue 创建不会隐式触发代码修改、远程推送或 PR。完整阶段、门禁和验收指标见 [ROADMAP.md](ROADMAP.md#中文)。
+当前已提供修复 Skill、工作包契约和确定性运行账本。先以单 Issue、单工作包、串行方式使用；仓库级小批次和最多 3 个 worker 的有限并发，需要在真实仓库中积累验收与回归数据后再启用。完整门禁和扩展指标见 [ROADMAP.md](ROADMAP.md#中文)。
 
 ### 许可证
 
 本项目使用 [MIT License](LICENSE)。
 
-[English](#english) · [返回顶部](#github-issue-handoff)
+[English](#english) · [返回顶部](#github-issue-workflow)
 
 ---
 
@@ -118,22 +135,18 @@ $github-issue-handoff https://github.com/owner/repo 帮我排查登录接口偶�
 
 ### Overview
 
-This is a skill package for agent workflows, used by skill-capable runtimes such as Claude Code. It takes a GitHub repository link and an optional task description, and produces a well-structured, Chinese-written GitHub Issue that another agent can pick up using only the Issue. `Handoff` emphasizes a verified task transfer, not merely creating a record.
-
-The current release only creates and reads back Issues. It does not read an existing Issue and modify code automatically. That higher-permission capability is planned as a separate `github-issue-repair` workflow; see the [roadmap](ROADMAP.md#english).
+This package contains two composable Skills with separate permission surfaces. `github-issue-handoff` turns repository context and user intent into an executable Issue. `github-issue-repair` reads an existing Issue, proposes work packages and verification, edits in isolated worktrees after scope approval, and may create a draft PR after publication approval.
 
 When upgrading, remove the installed `github-issue-creator/` copy before installing `github-issue-handoff/`, and update explicit invocations to `$github-issue-handoff` so runtimes do not discover both skills.
 
 ### Features
 
-- Parses and validates the repository (owner/repo) and Issues availability, without trusting string parsing
-- Applies the matching `github-issue-handoff/references/issue-templates.md` template by deliverable type (Feature / Bug / Refactor / Research)
-- Executability gate: task goal, repository context, scope, acceptance criteria, and validation are required; unverifiable facts are marked `待确认`
-- Deduplication and safety checks: searches existing Issues; security-sensitive reports go through the repository's private Security Policy channel
-- Keeps tasks atomic: one Issue per independently verifiable outcome; splits multi-task requests before confirmation
-- Reads back the created Issue with `gh issue view` to confirm the title and body are complete
-- Issue prose is fully Chinese; code, commands, paths, and logs stay in their original form
-- Does not add labels, assignees, milestones, or projects unless explicitly requested
+- `github-issue-handoff` validates repositories, detects duplicates, applies Feature / Bug / Refactor / Research templates, and creates a Chinese Issue only after its executability gate passes.
+- `github-issue-repair` normalizes Issues into work packages and models dependencies, duplicates, shared root causes, and conflicts; repository URLs default to read-only triage.
+- Repair workers use isolated worktrees and never edit the user's active tree. The MVP is sequential; a mature batch may run at most three low-interaction-risk packages concurrently.
+- An independent reviewer checks acceptance criteria, verification evidence, scope drift, and weakened tests.
+- A deterministic ledger records base/head SHAs, plans, approvals, state transitions, and remote receipts for recovery and idempotent publication.
+- Code edits and draft-PR publication have separate approval gates. The workflow never auto-merges, closes, comments, labels, releases, or deploys.
 
 ### Quick Start
 
@@ -147,16 +160,17 @@ When upgrading, remove the installed `github-issue-creator/` copy before install
 For the easiest setup, copy the following prompt directly into your agent session and let the agent install the skill for its runtime:
 
 ```text
-Please install this skill for me: https://github.com/Niall-Young/Issue-creator-skill
+Please install both skills from this repository: https://github.com/Niall-Young/github-issue-workflow
 ```
 
 Depending on the runtime and its permissions, the agent may request authorization or explain why it cannot install the skill automatically.
 
-For manual installation, clone the repository and copy its `github-issue-handoff/` directory into the skill directory used by your agent runtime. The commands below use Claude Code's `~/.claude/skills/` as an example; restart the session after installation:
+For manual installation, clone the repository and copy both skill directories into the skill directory used by your runtime. The commands below use Claude Code's `~/.claude/skills/` as an example; restart the session after installation:
 
 ```sh
-git clone https://github.com/Niall-Young/Issue-creator-skill.git
-cp -R Issue-creator-skill/github-issue-handoff ~/.claude/skills/github-issue-handoff
+git clone https://github.com/Niall-Young/github-issue-workflow.git
+cp -R github-issue-workflow/github-issue-handoff ~/.claude/skills/github-issue-handoff
+cp -R github-issue-workflow/github-issue-repair ~/.claude/skills/github-issue-repair
 ```
 
 #### Run
@@ -165,6 +179,8 @@ Nothing to run directly. Invoke the skill explicitly in the agent session:
 
 ```sh
 $github-issue-handoff <GitHub URL>
+$github-issue-repair <GitHub Issue URL>
+$github-issue-repair <GitHub Repository URL>
 ```
 
 ### Usage
@@ -177,9 +193,18 @@ $github-issue-handoff https://github.com/owner/repo Investigate occasional login
 
 Expected result: the skill produces a Chinese Issue from the Bug template, passes the pre-creation gate and deduplication check, submits it, and returns the title with a clickable Issue URL. If the report is security-sensitive, it follows the Security Policy's private channel instead of creating a public Issue.
 
+Repair an existing Issue:
+
+```sh
+$github-issue-repair https://github.com/owner/repo/issues/123
+```
+
+Expected result: the skill first performs read-only analysis and presents the package, base SHA, risk, budget, and verification plan. It may edit locally only after scope approval, and may push and create a draft PR only after the user reviews the diff and evidence and authorizes publication. With only a repository URL, it proposes a capped candidate batch instead of repairing every Issue.
+
 ### Configuration
 
-- `github-issue-handoff/agents/openai.yaml`: provides the interface configuration for an OpenAI-compatible agent (display name, default prompt) and declares implicit invocation as allowed. The skill itself works without extra configuration.
+- Each Skill's `agents/openai.yaml` provides OpenAI-compatible UI metadata and allows automatic discovery. Discovery is not authorization to edit code or write remotely.
+- `github-issue-repair/scripts/run_state.py` uses only the Python standard library and stores its ledger under the repository's common Git directory.
 
 ### Project Structure
 
@@ -188,28 +213,37 @@ Expected result: the skill produces a Chinese Issue from the Bug template, passe
 ├── LICENSE                        # MIT license
 ├── README.md                      # Project documentation and installation guide
 ├── ROADMAP.md                     # Phased plan from Issue creation to repair
-└── github-issue-handoff/          # Independently installable skill directory
-    ├── SKILL.md                   # Skill definition and workflow
-    ├── agents/
-    │   └── openai.yaml            # OpenAI-compatible agent interface config
-    └── references/
-        └── issue-templates.md     # Feature / Bug / Refactor / Research templates
+├── github-issue-handoff/          # Issue creation and handoff Skill
+├── github-issue-repair/           # Issue triage and repair Skill
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/repair-contract.md
+│   └── scripts/run_state.py       # State, approval, and receipt ledger
+└── tests/test_run_state.py        # Ledger unit tests
 ```
 
 ### Development and Verification
 
-This project has no automated tests. Verification is end-to-end via the GitHub CLI:
+Run the automated tests and Skill validators:
+
+```sh
+python3 -m unittest discover -s tests -v
+python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
+python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
+```
+
+Real GitHub mutations still require CLI readback:
 
 - `gh repo view` validates repository info and Issues availability
 - `gh issue create` submits the Issue (body passed via stdin or a temporary file)
 - `gh issue view` reads back and verifies the result
 
-### Next Stage
+### Maturity
 
-Add a separate `github-issue-repair` workflow. It will first prove a safe, sequential loop for one Issue and one work package, then earn repository-level triage and bounded concurrency through measured results. Issue creation will never implicitly trigger code changes, remote pushes, or PR publication. See [ROADMAP.md](ROADMAP.md#english) for phases, gates, and success metrics.
+The repair Skill, work-package contract, and deterministic run ledger are available. Start with one Issue and one sequential package. Repository-level batches and bounded concurrency of up to three workers should be enabled only after real repositories provide sufficient acceptance and regression evidence. See [ROADMAP.md](ROADMAP.md#english) for gates and expansion metrics.
 
 ### License
 
 This project is licensed under the [MIT License](LICENSE).
 
-[中文](#中文) · [Back to top](#github-issue-handoff)
+[中文](#中文) · [Back to top](#github-issue-workflow)

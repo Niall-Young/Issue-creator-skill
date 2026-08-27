@@ -16,6 +16,8 @@
 
 两者可以共享 URL 解析、GitHub 读取、仓库上下文采集与结构化 Issue 数据，但必须拥有不同的触发条件、授权边界、状态与成功标准。
 
+当前仓库已包含两个 Skill、工作包契约、审批状态机和幂等运行账本。默认使用单 Issue、单工作包、串行闭环；Phase 4 的仓库级小批次与有限并发仍需用真实验收数据解锁。
+
 ### 核心原则
 
 - 调度单位是“工作包”，不是机械地“一条 Issue 一个 subagent”。一条 Issue 可以拆成多个工作包；多个 Issue 也可能因为相同根因合并。
@@ -114,6 +116,8 @@ Keep two composable workflows with separate permission surfaces:
 - `github-issue-repair`: reads an existing Issue, proposes work packages and verification, modifies code after approval, and may publish a draft PR after a separate publication authorization.
 
 They may share URL parsing, GitHub reads, repository context collection, and structured Issue data, but they must retain distinct triggers, authorization boundaries, state, and success criteria.
+
+The repository now includes both Skills, the work-package contract, approval state machine, and idempotent run ledger. The default is one Issue and one sequential package; Phase 4 repository batches and bounded concurrency still require real acceptance evidence before activation.
 
 ### Core Principles
 
