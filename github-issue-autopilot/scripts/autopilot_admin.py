@@ -239,16 +239,17 @@ def run_watcher(repo_path: Path, operation: str, extra: list[str] | None = None)
     argv = [sys.executable, str(watcher), operation, "--config", info["config"], *(extra or [])]
     result = command(argv)
     try:
-        value = json.loads(result.stdout or result.stderr)
+        watcher_result = json.loads(result.stdout or result.stderr)
     except json.JSONDecodeError as exc:
         raise AdminError(result.stderr.strip() or result.stdout.strip() or "watcher returned invalid JSON") from exc
     if result.returncode and operation != "doctor":
-        raise AdminError((value.get("error") if isinstance(value, dict) else None)
+        raise AdminError((watcher_result.get("error") if isinstance(watcher_result, dict) else None)
                          or result.stderr.strip() or "watcher command failed")
-    if not isinstance(value, dict) or value.get("status") == "error":
-        raise AdminError(value.get("error", "watcher command failed") if isinstance(value, dict)
+    if not isinstance(watcher_result, dict) or watcher_result.get("status") == "error":
+        raise AdminError(watcher_result.get("error", "watcher command failed")
+                         if isinstance(watcher_result, dict)
                          else "watcher returned invalid JSON")
-    return value
+    return watcher_result
 
 
 def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
