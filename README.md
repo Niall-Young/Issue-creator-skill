@@ -89,7 +89,22 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 在任意 GitHub 项目中说“构建 Issue 循环检查机制”，Autopilot 会运行确定性安装器，创建缺失的 `agent-ready` 标签、仓库独立配置、Orca 原生 Automation 与 Orca 协调器。Automation 可在 GUI 中暂停、恢复和查看历史；它每三分钟预检一次，只有协调器缺失时才调用 Agent 恢复，不会每轮消耗模型。全部合格 Issue 都会入账，最多三个在 Orca 左侧作为项目子 worktree 同时运行。未完成的 `failed` attempt 若对应 Issue 仍 open 且符合策略，会在下一轮自动重试，默认总计最多两次；待验收、明确需人工或策略阻塞的结果不会自动重做。每个 Issue 的每次 attempt 必须使用从未被历史 attempt 或其他 Issue 使用过的 Orca Task、Dispatch、worktree ID 和绝对路径；身份复用或成功证据不完整会停止等待人工处理，不会退回手工或共享 worktree。安装时用 `--agent` 选择默认 Agent；单个 Issue 可用唯一 `agent:ID` 标签覆盖，冲突、禁用或不可用的 Agent 会停在可见的人工处理状态。满意时明确 `accept` 到当前干净的目标分支；它会在合并成功后关闭并回读对应 Issue，关闭失败则保留 worktree 供安全重试。若 worktree 已被手工清理，只有记录的修复 head 已在目标分支历史中时才能补关。不满意时通过明确的 `retry` 保留旧 attempt 历史并创建全新 Orca 子 worktree；人工重试可超过自动次数上限。旧 worktree 仍存在且决定舍弃时使用 `retry --discard-worktree` 精确清理。standalone repair、手工 `git worktree`、共享 worktree、手工合并或补写账本都不能替代该流程。详见 [`configuration.md`](github-issue-autopilot/references/configuration.md)。
 
-首次安装第四个 Skill 后，直接说“更新 issue-workflow”即可更新当前 Agent 运行时。更新器只接受 `Niall-Young/github-issue-workflow` 的最新稳定 Release，拒绝 draft、prerelease、降级、校验失败和异常归档。它会覆盖四个受管 Skill（包括手工修改），并同步所有已安装的 Autopilot runtime；任一步失败都会恢复整套 Skill、runtime 与 Automation 状态。它不会执行 `git pull`、修改源码 checkout、更新其他 Skill 或扫描其他 Agent 运行时。仓库中的首个发行版本声明为 `v0.1.0`；必须在获得远程发布授权后推送同名 tag，更新器才会取得首个稳定包。
+### 更新机制
+
+更新不会在后台自动运行。首次安装 `github-issue-workflow-update` 后，只有用户明确要求检查或更新时，Agent 才会调用更新器：
+
+```sh
+$github-issue-workflow-update 检查 issue-workflow 更新
+$github-issue-workflow-update 更新 issue-workflow
+```
+
+- **检查**是只读操作，只返回当前安装版本、最新稳定版本和是否有更新，不修改 Skill 或 Autopilot。
+- **更新**从 `Niall-Young/github-issue-workflow` 获取最新已发布的稳定 Release。即使版本号相同，也会重新安装官方文件以清除本地漂移；四个受管 Skill 中的手工修改会被覆盖。成功后建议新开会话，让 Agent 重新加载 Skill 指令。
+- 更新器先校验 Release 来源、版本、归档 SHA-256、清单、文件白名单和逐文件哈希，再对所有已安装的 Autopilot runtime 做只读预检。预检通过后，它事务式替换四个 Skill，同步 runtime，并回读验证 Orca Automation 和 runtime 文件。
+- Autopilot 的配置、SQLite 账本、日志、attempt 历史和 worktree 会保留。Skill、runtime 或 Automation 更新失败时会自动恢复旧状态；只有回滚本身也失败的罕见 `partial-update` 才需要人工恢复，Agent 必须明确报告受影响组件。
+- 更新范围仅限当前 Agent 运行时中的四个官方 Skill，以及由它们管理的已安装 Autopilot runtime。它不会执行 `git pull`、修改源码 checkout、更新其他 Skill，也不会扫描或改动其他 Agent 运行时。
+
+发布端以 `vMAJOR.MINOR.PATCH` tag 触发 GitHub Actions：先运行测试，再构建带版本清单、逐文件哈希和归档校验和的可复现包，最后发布稳定 Release。更新器只消费已发布的稳定 Release，拒绝 draft、prerelease、降级、校验失败和异常归档；仅推送 tag、但尚未成功生成稳定 Release 时，不会成为可安装更新。`v0.1.0` 是首个声明的发行版本。
 
 ### 配置
 
@@ -160,7 +175,7 @@ python3 scripts/build_release.py --tag v0.1.0 --commit "$(git rev-parse HEAD)" -
 
 ### 成熟度
 
-当前已提供单机 Orca 原生 Automation 一键安装、SQLite 幂等领取、Orca 可见子 worktree、可配置 Agent、最多三任务并发，以及基于稳定 Release 的整套本地更新与 runtime 回滚代码；更新入口会在首个正式 tag 发布后生效。成功后保留本地分支等待人工接受；失败任务保留可见现场，并在仍 open 且符合策略时进行有上限的下一轮续做。自动 draft PR 与多机调度仍未启用。普通用户进程属于“降低风险的隔离”，不是保护全部本地秘密的强安全边界；处理不可信仓库时应使用低权限账户或更强沙箱。完整门禁和扩展指标见 [ROADMAP.md](ROADMAP.md#中文)。
+当前已提供单机 Orca 原生 Automation 一键安装、SQLite 幂等领取、Orca 可见子 worktree、可配置 Agent、最多三任务并发，以及基于稳定 Release 的整套本地更新与 runtime 回滚代码；更新入口要求 GitHub 上存在已发布的稳定 Release。成功后保留本地分支等待人工接受；失败任务保留可见现场，并在仍 open 且符合策略时进行有上限的下一轮续做。自动 draft PR 与多机调度仍未启用。普通用户进程属于“降低风险的隔离”，不是保护全部本地秘密的强安全边界；处理不可信仓库时应使用低权限账户或更强沙箱。完整门禁和扩展指标见 [ROADMAP.md](ROADMAP.md#中文)。
 
 ### 许可证
 
@@ -249,7 +264,22 @@ Expected result: the skill first performs read-only analysis and presents the pa
 
 In any GitHub checkout, ask the Agent to “build an Issue loop.” Autopilot creates the missing `agent-ready` label, repository-isolated configuration, a native Orca Automation, and an Orca coordinator. The Automation can be paused, resumed, and inspected in the GUI. It prechecks every three minutes and invokes an Agent only when the coordinator needs recovery, so healthy checks consume no model turn. Every eligible Issue is recorded, and up to three run concurrently as visible child worktrees in the Orca sidebar. An unfinished `failed` attempt whose Issue remains open and eligible is retried on the next cycle, with two total automatic attempts by default; review-ready, explicit human-action, and policy-blocked results do not relaunch automatically. Each Issue attempt must use Orca Task, Dispatch, worktree ID, and absolute-path identities that no historical attempt or other Issue has used; reused identity or incomplete success evidence stops for human action without a manual or shared-worktree fallback. `--agent` selects the repository default; one `agent:ID` Issue label may override it, while conflicting, disallowed, or unavailable choices stop visibly for human action. Explicitly `accept` a satisfactory branch into a named clean target branch; after a successful merge, the command closes and reads back the matching Issue, preserving the worktree for a safe retry if closure fails. If the worktree was manually removed, closure proceeds only when the recorded repair head is already in the target branch history. An unsatisfactory attempt continues through explicit `retry`, which preserves the old attempt as history, may exceed the automatic limit, and creates a fresh Orca child worktree. When an old worktree still exists and is being discarded, `retry --discard-worktree` removes that exact recorded worktree. Standalone repair, manual `git worktree`, shared worktrees, manual merges, and ledger backfills are not substitutes. See [`configuration.md`](github-issue-autopilot/references/configuration.md).
 
-After the fourth Skill has been installed once, say “update issue-workflow” to update the current Agent runtime. The updater accepts only the latest stable Release from `Niall-Young/github-issue-workflow` and rejects drafts, prereleases, downgrades, checksum failures, and malformed archives. It overwrites the four managed Skills, including local edits, and refreshes every installed Autopilot runtime. Any failure restores the complete Skill, runtime, and Automation state. It never runs `git pull`, modifies a source checkout, updates another Skill, or scans another Agent runtime. The repository declares `v0.1.0` as its first release version; the matching tag must be pushed with explicit publication authorization before the updater can retrieve its first stable bundle.
+### Update Mechanism
+
+Updates never run automatically in the background. After `github-issue-workflow-update` has been installed once, the Agent invokes it only when the user explicitly asks to check or apply an update:
+
+```sh
+$github-issue-workflow-update check for issue-workflow updates
+$github-issue-workflow-update update issue-workflow
+```
+
+- **Check** is read-only. It reports the installed version, latest stable version, and update availability without modifying a Skill or Autopilot installation.
+- **Update** fetches the latest published stable Release from `Niall-Young/github-issue-workflow`. It reinstalls official files even when the version is unchanged, removing local drift and overwriting manual edits in the four managed Skills. Start a new conversation afterward so the Agent reloads the Skill instructions.
+- The updater verifies the Release source, version, archive SHA-256, manifest, file allowlist, and every file hash, then performs a read-only preflight of all installed Autopilot runtimes. After preflight it transactionally swaps the four Skills, refreshes the runtimes, and reads back the Orca Automations and runtime files.
+- Autopilot configuration, SQLite ledgers, logs, attempt history, and worktrees are preserved. A Skill, runtime, or Automation failure restores the previous state automatically. Only the rare `partial-update` result, where rollback itself also fails, requires manual recovery; the Agent must identify the affected component.
+- The scope is limited to the four official Skills in the current Agent runtime and the installed Autopilot runtimes they manage. It never runs `git pull`, modifies a source checkout, updates an unrelated Skill, or scans or changes another Agent runtime.
+
+On the publishing side, a `vMAJOR.MINOR.PATCH` tag triggers GitHub Actions to run the tests, build a reproducible bundle with a version manifest, per-file hashes, and an archive checksum, and publish a stable Release. The updater consumes only published stable Releases and rejects drafts, prereleases, downgrades, checksum failures, and malformed archives. A pushed tag that has not produced a stable Release is not installable. `v0.1.0` is the first declared release version.
 
 ### Configuration
 
@@ -320,7 +350,7 @@ Real GitHub mutations still require CLI readback:
 
 ### Maturity
 
-Single-machine installation through native Orca Automation, SQLite idempotent claims, visible Orca child worktrees, configurable Agents, up to three concurrent tasks, and the stable-Release updater with runtime rollback are implemented; the update entry point becomes live after the first formal tag is published. Successful branches wait for human acceptance. Failed attempts preserve visible evidence and receive a bounded next-cycle retry while their Issue remains open and eligible. Automatic draft PRs and multi-runner scheduling remain disabled. A normal user process provides reduced isolation, not a strong boundary protecting all local secrets; use a low-privilege account or stronger sandbox for hostile repositories. See [ROADMAP.md](ROADMAP.md#english) for gates and expansion metrics.
+Single-machine installation through native Orca Automation, SQLite idempotent claims, visible Orca child worktrees, configurable Agents, up to three concurrent tasks, and the stable-Release updater with runtime rollback are implemented; the update entry point requires a published stable GitHub Release. Successful branches wait for human acceptance. Failed attempts preserve visible evidence and receive a bounded next-cycle retry while their Issue remains open and eligible. Automatic draft PRs and multi-runner scheduling remain disabled. A normal user process provides reduced isolation, not a strong boundary protecting all local secrets; use a low-privilege account or stronger sandbox for hostile repositories. See [ROADMAP.md](ROADMAP.md#english) for gates and expansion metrics.
 
 ### License
 
