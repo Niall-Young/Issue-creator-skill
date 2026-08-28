@@ -15,7 +15,7 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 
 ### 项目简介
 
-这是一个面向 Agent 开发流程的技能包，包含三个权限独立、可组合的 Skill：`github-issue-handoff` 把仓库上下文和用户意图交接成可执行 Issue；`github-issue-repair` 在隔离 worktree 中修复既有 Issue；`github-issue-autopilot` 自动发现符合本地策略的 open Issue，并在 Orca 中启动可见的 Agent 任务。
+这是一个面向 Agent 开发流程的技能包，包含四个权限独立、可组合的 Skill：`github-issue-handoff` 把仓库上下文和用户意图交接成可执行 Issue；`github-issue-repair` 在隔离 worktree 中修复既有 Issue；`github-issue-autopilot` 自动发现符合本地策略的 open Issue，并在 Orca 中启动可见的 Agent 任务；`github-issue-workflow-update` 从最新稳定 Release 更新整套本地安装。
 
 从旧版本升级时，请删除运行时中的 `github-issue-creator/` 安装副本，再安装 `github-issue-handoff/`，并把显式调用改为 `$github-issue-handoff`，避免新旧技能同时被发现。
 
@@ -24,6 +24,7 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 - `github-issue-handoff`：校验仓库、检索重复项、套用 Feature / Bug / Refactor / Research 模板，通过可执行性门禁后创建并回读中文 Issue。
 - `github-issue-repair`：把 Issue 归一化为工作包，识别依赖、重复、同根因与冲突关系；仓库 URL 默认只做只读分诊。
 - `github-issue-autopilot`：一句话为当前仓库安装本地循环，领取由当前用户创建且带 `agent-ready` 的全部 open Issue，包括启用前已创建的积压任务，并调用 `$github-issue-repair`。
+- `github-issue-workflow-update`：用户说“检查 issue-workflow 更新”时只读比较版本，说“更新 issue-workflow”时覆盖当前 Agent 运行时中的四个官方 Skill，并同步已安装的 Autopilot runtime。
 - 修复 worker 使用 Orca 管理的项目子 worktree，不修改用户正在使用的工作树；一次记录全部合格 Issue，最多并发 3 个任务。
 - 独立 reviewer 核对验收标准、验证证据、范围漂移和测试弱化。
 - 双层账本以 Issue node ID 防止重复派单，并为每次 attempt 记录所选 Agent、Orca Task/Dispatch/worktree、分支、base/head SHA 和结果。
@@ -41,18 +42,19 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 推荐将下面的提示词直接复制到你的 Agent 会话中，让 Agent 根据其运行环境完成安装：
 
 ```text
-帮我安装这个 skill 仓库中的三个技能：https://github.com/Niall-Young/github-issue-workflow
+帮我安装这个 skill 仓库中的四个技能：https://github.com/Niall-Young/github-issue-workflow
 ```
 
 Agent 可能会根据运行环境请求必要的授权，或说明无法自动安装时的限制。
 
-如需手动安装，可克隆仓库，再将三个技能目录复制到 Agent 运行时的 skill 目录。以下命令以 Claude Code 的 `~/.claude/skills/` 为例；安装后请重新启动会话：
+如需手动安装，可克隆仓库，再将四个技能目录复制到 Agent 运行时的 skill 目录。以下命令以 Claude Code 的 `~/.claude/skills/` 为例；安装后请重新启动会话：
 
 ```sh
 git clone https://github.com/Niall-Young/github-issue-workflow.git
 cp -R github-issue-workflow/github-issue-handoff ~/.claude/skills/github-issue-handoff
 cp -R github-issue-workflow/github-issue-repair ~/.claude/skills/github-issue-repair
 cp -R github-issue-workflow/github-issue-autopilot ~/.claude/skills/github-issue-autopilot
+cp -R github-issue-workflow/github-issue-workflow-update ~/.claude/skills/github-issue-workflow-update
 ```
 
 #### 运行
@@ -64,6 +66,7 @@ $github-issue-handoff <GitHub URL>
 $github-issue-repair <GitHub Issue URL>
 $github-issue-repair <GitHub Repository URL>
 python3 github-issue-autopilot/scripts/autopilot_admin.py install --repo-path /absolute/repository/root --agent codex
+$github-issue-workflow-update 更新 issue-workflow
 ```
 
 ### 使用方法
@@ -86,11 +89,14 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 在任意 GitHub 项目中说“构建 Issue 循环检查机制”，Autopilot 会运行确定性安装器，创建缺失的 `agent-ready` 标签、仓库独立配置、Orca 原生 Automation 与 Orca 协调器。Automation 可在 GUI 中暂停、恢复和查看历史；它每三分钟预检一次，只有协调器缺失时才调用 Agent 恢复，不会每轮消耗模型。全部合格 Issue 都会入账，最多三个在 Orca 左侧作为项目子 worktree 同时运行。未完成的 `failed` attempt 若对应 Issue 仍 open 且符合策略，会在下一轮自动重试，默认总计最多两次；待验收、明确需人工或策略阻塞的结果不会自动重做。每个 Issue 的每次 attempt 必须使用从未被历史 attempt 或其他 Issue 使用过的 Orca Task、Dispatch、worktree ID 和绝对路径；身份复用或成功证据不完整会停止等待人工处理，不会退回手工或共享 worktree。安装时用 `--agent` 选择默认 Agent；单个 Issue 可用唯一 `agent:ID` 标签覆盖，冲突、禁用或不可用的 Agent 会停在可见的人工处理状态。满意时明确 `accept` 到当前干净的目标分支；它会在合并成功后关闭并回读对应 Issue，关闭失败则保留 worktree 供安全重试。若 worktree 已被手工清理，只有记录的修复 head 已在目标分支历史中时才能补关。不满意时通过明确的 `retry` 保留旧 attempt 历史并创建全新 Orca 子 worktree；人工重试可超过自动次数上限。旧 worktree 仍存在且决定舍弃时使用 `retry --discard-worktree` 精确清理。standalone repair、手工 `git worktree`、共享 worktree、手工合并或补写账本都不能替代该流程。详见 [`configuration.md`](github-issue-autopilot/references/configuration.md)。
 
+首次安装第四个 Skill 后，直接说“更新 issue-workflow”即可更新当前 Agent 运行时。更新器只接受 `Niall-Young/github-issue-workflow` 的最新稳定 Release，拒绝 draft、prerelease、降级、校验失败和异常归档。它会覆盖四个受管 Skill（包括手工修改），并同步所有已安装的 Autopilot runtime；任一步失败都会恢复整套 Skill、runtime 与 Automation 状态。它不会执行 `git pull`、修改源码 checkout、更新其他 Skill 或扫描其他 Agent 运行时。仓库中的首个发行版本声明为 `v1.0.0`；必须在获得远程发布授权后推送同名 tag，更新器才会取得首个稳定包。
+
 ### 配置
 
-- 三个 Skill 的 `agents/openai.yaml` 提供 OpenAI 兼容 Agent 的界面配置并允许自动发现；技能发现本身不构成修改代码或远程写入授权。
+- 四个 Skill 的 `agents/openai.yaml` 提供 OpenAI 兼容 Agent 的界面配置并允许自动发现；技能发现本身不构成修改代码或远程写入授权。
 - `github-issue-repair/scripts/run_state.py` 使用 Python 标准库，在仓库 Git 公共目录中维护运行账本，无需额外依赖。
-- `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、列举、检查、停用、验收、放弃、重做或卸载仓库循环；`issue_watcher.py` 负责全部合格 open Issue 的扫描、最多三任务领取、Orca 调度、attempt 账本和 Git 证据回读，远程发布策略固定为 `never`。
+- `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、列举、检查、停用、验收、放弃、重做、刷新 runtime 或卸载仓库循环；`issue_watcher.py` 负责全部合格 open Issue 的扫描、最多三任务领取、Orca 调度、attempt 账本和 Git 证据回读，远程发布策略固定为 `never`。
+- `github-issue-workflow-update/scripts/update_workflow.py` 校验正式 Release 并事务式替换当前运行时；`scripts/build_release.py` 生成包含版本清单、逐文件哈希和归档校验和的可复现发布包。
 - 管理员级 `doctor` 同时检查 watcher、Orca Automation 的启用状态与安全字段，以及是否残留重复的旧 LaunchAgent，全程只读并返回可诊断字段。每轮扫描包含启用前已创建但当前仍符合作者与标签策略的 open Issue；不可变 Issue node ID 防止活动中、待验收或需人工的任务重复派单，同时允许失败任务在 `max_attempts` 上限内于下一轮续做。
 
 移除 Orca 项目或删除本地仓库前，先处理待验收和运行中的任务，再卸载自动化：
@@ -124,6 +130,12 @@ python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository
 │   ├── agents/openai.yaml
 │   ├── references/repair-contract.md
 │   └── scripts/run_state.py       # 状态、审批与回执账本
+├── github-issue-workflow-update/  # 最新稳定 Release 检查与事务式更新
+│   ├── SKILL.md
+│   ├── VERSION
+│   └── scripts/update_workflow.py
+├── scripts/build_release.py       # 构建带清单与校验和的正式发布包
+├── .github/workflows/release.yml  # 通过版本 tag 测试并发布稳定包
 └── tests/                         # 修复账本与自动调度单元测试
 ```
 
@@ -136,6 +148,8 @@ python3 -m unittest discover -s tests -v
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
+python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
+python3 scripts/build_release.py --tag v1.0.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
 ```
 
 真实 GitHub 操作还需通过 CLI 端到端回读：
@@ -146,7 +160,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 
 ### 成熟度
 
-当前已提供单机 Orca 原生 Automation 一键安装、SQLite 幂等领取、Orca 可见子 worktree、可配置 Agent 和最多三任务并发。成功后保留本地分支等待人工接受；失败任务保留可见现场，并在仍 open 且符合策略时进行有上限的下一轮续做。自动 draft PR 与多机调度仍未启用。普通用户进程属于“降低风险的隔离”，不是保护全部本地秘密的强安全边界；处理不可信仓库时应使用低权限账户或更强沙箱。完整门禁和扩展指标见 [ROADMAP.md](ROADMAP.md#中文)。
+当前已提供单机 Orca 原生 Automation 一键安装、SQLite 幂等领取、Orca 可见子 worktree、可配置 Agent、最多三任务并发，以及基于稳定 Release 的整套本地更新与 runtime 回滚代码；更新入口会在首个正式 tag 发布后生效。成功后保留本地分支等待人工接受；失败任务保留可见现场，并在仍 open 且符合策略时进行有上限的下一轮续做。自动 draft PR 与多机调度仍未启用。普通用户进程属于“降低风险的隔离”，不是保护全部本地秘密的强安全边界；处理不可信仓库时应使用低权限账户或更强沙箱。完整门禁和扩展指标见 [ROADMAP.md](ROADMAP.md#中文)。
 
 ### 许可证
 
@@ -161,7 +175,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 
 ### Overview
 
-This package contains three composable Skills with separate permission surfaces. `github-issue-handoff` turns repository context and user intent into an executable Issue. `github-issue-repair` repairs existing Issues in isolated worktrees. `github-issue-autopilot` discovers eligible open Issues and starts visible Agent tasks in Orca.
+This package contains four composable Skills with separate permission surfaces. `github-issue-handoff` turns repository context and user intent into an executable Issue. `github-issue-repair` repairs existing Issues in isolated worktrees. `github-issue-autopilot` discovers eligible open Issues and starts visible Agent tasks in Orca. `github-issue-workflow-update` updates the complete local installation from the latest stable Release.
 
 When upgrading, remove the installed `github-issue-creator/` copy before installing `github-issue-handoff/`, and update explicit invocations to `$github-issue-handoff` so runtimes do not discover both skills.
 
@@ -170,6 +184,7 @@ When upgrading, remove the installed `github-issue-creator/` copy before install
 - `github-issue-handoff` validates repositories, detects duplicates, applies Feature / Bug / Refactor / Research templates, and creates a Chinese Issue only after its executability gate passes.
 - `github-issue-repair` normalizes Issues into work packages and models dependencies, duplicates, shared root causes, and conflicts; repository URLs default to read-only triage.
 - `github-issue-autopilot` installs a local loop with one request, claims every open Issue created by the current user carrying `agent-ready`, including eligible backlog created before activation, and invokes `$github-issue-repair`.
+- `github-issue-workflow-update` checks versions read-only when asked to check and replaces all four official Skills plus installed Autopilot runtimes when asked to update issue-workflow.
 - Repair workers use Orca-managed child worktrees and never edit the user's active tree. Every eligible Issue is recorded, with at most three tasks running concurrently.
 - An independent reviewer checks acceptance criteria, verification evidence, scope drift, and weakened tests.
 - A two-level ledger deduplicates immutable Issue node IDs and records every attempt's selected Agent, Orca Task/Dispatch/worktree, branch, base/head SHAs, and outcome.
@@ -187,18 +202,19 @@ When upgrading, remove the installed `github-issue-creator/` copy before install
 For the easiest setup, copy the following prompt directly into your agent session and let the agent install the skill for its runtime:
 
 ```text
-Please install all three skills from this repository: https://github.com/Niall-Young/github-issue-workflow
+Please install all four skills from this repository: https://github.com/Niall-Young/github-issue-workflow
 ```
 
 Depending on the runtime and its permissions, the agent may request authorization or explain why it cannot install the skill automatically.
 
-For manual installation, clone the repository and copy all three skill directories into the skill directory used by your runtime. The commands below use Claude Code's `~/.claude/skills/` as an example; restart the session after installation:
+For manual installation, clone the repository and copy all four skill directories into the skill directory used by your runtime. The commands below use Claude Code's `~/.claude/skills/` as an example; restart the session after installation:
 
 ```sh
 git clone https://github.com/Niall-Young/github-issue-workflow.git
 cp -R github-issue-workflow/github-issue-handoff ~/.claude/skills/github-issue-handoff
 cp -R github-issue-workflow/github-issue-repair ~/.claude/skills/github-issue-repair
 cp -R github-issue-workflow/github-issue-autopilot ~/.claude/skills/github-issue-autopilot
+cp -R github-issue-workflow/github-issue-workflow-update ~/.claude/skills/github-issue-workflow-update
 ```
 
 #### Run
@@ -210,6 +226,7 @@ $github-issue-handoff <GitHub URL>
 $github-issue-repair <GitHub Issue URL>
 $github-issue-repair <GitHub Repository URL>
 python3 github-issue-autopilot/scripts/autopilot_admin.py install --repo-path /absolute/repository/root --agent codex
+$github-issue-workflow-update update issue-workflow
 ```
 
 ### Usage
@@ -232,11 +249,14 @@ Expected result: the skill first performs read-only analysis and presents the pa
 
 In any GitHub checkout, ask the Agent to “build an Issue loop.” Autopilot creates the missing `agent-ready` label, repository-isolated configuration, a native Orca Automation, and an Orca coordinator. The Automation can be paused, resumed, and inspected in the GUI. It prechecks every three minutes and invokes an Agent only when the coordinator needs recovery, so healthy checks consume no model turn. Every eligible Issue is recorded, and up to three run concurrently as visible child worktrees in the Orca sidebar. An unfinished `failed` attempt whose Issue remains open and eligible is retried on the next cycle, with two total automatic attempts by default; review-ready, explicit human-action, and policy-blocked results do not relaunch automatically. Each Issue attempt must use Orca Task, Dispatch, worktree ID, and absolute-path identities that no historical attempt or other Issue has used; reused identity or incomplete success evidence stops for human action without a manual or shared-worktree fallback. `--agent` selects the repository default; one `agent:ID` Issue label may override it, while conflicting, disallowed, or unavailable choices stop visibly for human action. Explicitly `accept` a satisfactory branch into a named clean target branch; after a successful merge, the command closes and reads back the matching Issue, preserving the worktree for a safe retry if closure fails. If the worktree was manually removed, closure proceeds only when the recorded repair head is already in the target branch history. An unsatisfactory attempt continues through explicit `retry`, which preserves the old attempt as history, may exceed the automatic limit, and creates a fresh Orca child worktree. When an old worktree still exists and is being discarded, `retry --discard-worktree` removes that exact recorded worktree. Standalone repair, manual `git worktree`, shared worktrees, manual merges, and ledger backfills are not substitutes. See [`configuration.md`](github-issue-autopilot/references/configuration.md).
 
+After the fourth Skill has been installed once, say “update issue-workflow” to update the current Agent runtime. The updater accepts only the latest stable Release from `Niall-Young/github-issue-workflow` and rejects drafts, prereleases, downgrades, checksum failures, and malformed archives. It overwrites the four managed Skills, including local edits, and refreshes every installed Autopilot runtime. Any failure restores the complete Skill, runtime, and Automation state. It never runs `git pull`, modifies a source checkout, updates another Skill, or scans another Agent runtime. The repository declares `v1.0.0` as its first release version; the matching tag must be pushed with explicit publication authorization before the updater can retrieve its first stable bundle.
+
 ### Configuration
 
-- Each Skill's `agents/openai.yaml` provides OpenAI-compatible UI metadata and allows automatic discovery. Skill discovery is not authorization to edit code or write remotely.
+- Each of the four Skills has `agents/openai.yaml` metadata and allows automatic discovery. Skill discovery is not authorization to edit code or write remotely.
 - `github-issue-repair/scripts/run_state.py` uses only the Python standard library and stores its ledger under the repository's common Git directory.
-- `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, lists, checks, stops, accepts, discards, retries, or uninstalls a repository loop. `issue_watcher.py` owns full eligible-open-Issue scans, three-slot claims, Orca dispatch, attempt history, and Git evidence readback; remote publication remains fixed to `never`.
+- `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, lists, checks, stops, accepts, discards, retries, refreshes runtimes, or uninstalls a repository loop. `issue_watcher.py` owns full eligible-open-Issue scans, three-slot claims, Orca dispatch, attempt history, and Git evidence readback; remote publication remains fixed to `never`.
+- `github-issue-workflow-update/scripts/update_workflow.py` verifies and transactionally installs stable Releases. `scripts/build_release.py` creates reproducible assets containing a release manifest, per-file hashes, and an archive checksum.
 - Administrator-level `doctor` checks the watcher, the Orca Automation's enabled state and safety fields, and any duplicate legacy LaunchAgent without mutating them. Every poll includes older open Issues that still match the author and label policy; immutable Issue node IDs prevent duplicate dispatch for active, review-ready, and human-stopped work while allowing failed work to continue on the next cycle within `max_attempts`.
 
 Before removing an Orca project or deleting its checkout, settle review-ready and running work, then uninstall the Automation:
@@ -270,6 +290,12 @@ If the path disappears, is no longer the original Git root, or is removed from O
 │   ├── agents/openai.yaml
 │   ├── references/repair-contract.md
 │   └── scripts/run_state.py       # State, approval, and receipt ledger
+├── github-issue-workflow-update/  # Stable Release check and transactional update
+│   ├── SKILL.md
+│   ├── VERSION
+│   └── scripts/update_workflow.py
+├── scripts/build_release.py       # Build the manifest and checksummed release bundle
+├── .github/workflows/release.yml  # Test and publish stable version tags
 └── tests/                         # Repair-ledger and automatic-dispatch unit tests
 ```
 
@@ -282,6 +308,8 @@ python3 -m unittest discover -s tests -v
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
+python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
+python3 scripts/build_release.py --tag v1.0.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
 ```
 
 Real GitHub mutations still require CLI readback:
@@ -292,7 +320,7 @@ Real GitHub mutations still require CLI readback:
 
 ### Maturity
 
-Single-machine installation through native Orca Automation, SQLite idempotent claims, visible Orca child worktrees, configurable Agents, and up to three concurrent tasks are now available. Successful branches wait for human acceptance. Failed attempts preserve visible evidence and receive a bounded next-cycle retry while their Issue remains open and eligible. Automatic draft PRs and multi-runner scheduling remain disabled. A normal user process provides reduced isolation, not a strong boundary protecting all local secrets; use a low-privilege account or stronger sandbox for hostile repositories. See [ROADMAP.md](ROADMAP.md#english) for gates and expansion metrics.
+Single-machine installation through native Orca Automation, SQLite idempotent claims, visible Orca child worktrees, configurable Agents, up to three concurrent tasks, and the stable-Release updater with runtime rollback are implemented; the update entry point becomes live after the first formal tag is published. Successful branches wait for human acceptance. Failed attempts preserve visible evidence and receive a bounded next-cycle retry while their Issue remains open and eligible. Automatic draft PRs and multi-runner scheduling remain disabled. A normal user process provides reduced isolation, not a strong boundary protecting all local secrets; use a low-privilege account or stronger sandbox for hostile repositories. See [ROADMAP.md](ROADMAP.md#english) for gates and expansion metrics.
 
 ### License
 

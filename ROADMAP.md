@@ -9,15 +9,16 @@
 
 ### 产品边界
 
-项目保留三个权限独立、可组合的工作流：
+项目保留四个权限独立、可组合的工作流：
 
 - `github-issue-handoff`：把仓库上下文与用户意图交接成 Agent 可执行的 Issue。创建 Issue 不会自动触发代码修改。
 - `github-issue-repair`：读取既有 Issue，提出工作包与验证方案，在获得授权后修改代码，并可在再次授权后发布 draft PR。
 - `github-issue-autopilot`：按可信本地策略自动发现 owner 创建的合格 open Issue，并在 Orca 可见子 worktree 中调用 repair 工作流。
+- `github-issue-workflow-update`：从最新稳定 Release 事务式更新当前 Agent 运行时，并同步已安装的 Autopilot runtime。
 
-三者可以共享 URL 解析、GitHub 读取、仓库上下文采集与结构化 Issue 数据，但必须拥有不同的触发条件、授权边界、状态与成功标准。
+四者可以共享必要的项目身份与结构化数据，但必须拥有不同的触发条件、授权边界、状态与成功标准。
 
-当前仓库已包含三个 Skill、工作包契约、审批状态机、修复账本和 SQLite 自动调度账本。单机轮询、Orca 可见任务、可配置 Agent 与最多三任务并发已实现；多机协调和自动发布仍需真实验收数据解锁。
+当前仓库已包含四个 Skill、工作包契约、审批状态机、修复账本、SQLite 自动调度账本与稳定 Release 更新器。单机轮询、Orca 可见任务、可配置 Agent、最多三任务并发和事务式 runtime 刷新已实现；多机协调和自动发布仍需真实验收数据解锁。
 
 ### 核心原则
 
@@ -120,15 +121,16 @@
 
 ### Product Boundary
 
-Keep three composable workflows with separate permission surfaces:
+Keep four composable workflows with separate permission surfaces:
 
 - `github-issue-handoff`: turns repository context and user intent into an agent-ready Issue. Creating an Issue never triggers code changes.
 - `github-issue-repair`: reads an existing Issue, proposes work packages and verification, modifies code after approval, and may publish a draft PR after a separate publication authorization.
 - `github-issue-autopilot`: discovers new owner-authored Issues under trusted local policy and invokes the repair workflow in visible Orca child worktrees.
+- `github-issue-workflow-update`: transactionally updates the current Agent runtime from the latest stable Release and refreshes installed Autopilot runtimes.
 
-They may share URL parsing, GitHub reads, repository context collection, and structured Issue data, but they must retain distinct triggers, authorization boundaries, state, and success criteria.
+They may share necessary project identity and structured data, but they must retain distinct triggers, authorization boundaries, state, and success criteria.
 
-The repository now includes all three Skills, the work-package contract, approval state machine, repair ledger, and SQLite dispatch ledger. Single-machine polling, visible Orca tasks, configurable Agents, and up to three concurrent workers are implemented; multi-runner coordination and automatic publication still require real acceptance evidence.
+The repository now includes all four Skills, the work-package contract, approval state machine, repair ledger, SQLite dispatch ledger, and stable-Release updater. Single-machine polling, visible Orca tasks, configurable Agents, up to three concurrent workers, and transactional runtime refresh are implemented; multi-runner coordination and automatic publication still require real acceptance evidence.
 
 ### Core Principles
 

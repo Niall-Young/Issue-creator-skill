@@ -1,0 +1,7 @@
+interface:
+  display_name: "GitHub Issue Workflow Update"
+  short_description: "一句话更新整套 Issue Workflow 与后台运行时"
+  default_prompt: "Use $github-issue-workflow-update to update issue-workflow to its latest stable release."
+
+policy:
+  allow_implicit_invocation: true

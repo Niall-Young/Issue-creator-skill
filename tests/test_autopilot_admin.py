@@ -239,6 +239,72 @@ class AutopilotAdminTests(unittest.TestCase):
         self.assertTrue(command_value.startswith("exec "))
         self.assertIn("issue_watcher.py run", command_value)
 
+    def runtime_refresh_fixture(self) -> tuple[Path, dict, dict]:
+        paths = ADMIN.build_paths("R_one")
+        config = ADMIN.build_config(
+            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
+            "agent-ready", paths, "codex", ["codex"],
+        )
+        config["scheduler"]["automation_id"] = "auto-1"
+        config_path = Path(paths["config"])
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        previous = ADMIN.expected_automation(config, config_path, enabled=False)
+        previous["id"] = "auto-1"
+        return config_path, config, {"result": {"automation": previous}}
+
+    def test_runtime_refresh_dry_run_is_read_only(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "GITHUB_ISSUE_AUTOPILOT_STATE_ROOT": str(self.root / "state"),
+        }):
+            config_path, _config, response = self.runtime_refresh_fixture()
+            with mock.patch.object(ADMIN, "orca_json", return_value=response) as orca:
+                result = ADMIN.refresh_runtimes(dry_run=True)
+        self.assertEqual("ready", result["status"])
+        self.assertEqual(1, result["installations"])
+        self.assertEqual(("automations", "show"), orca.call_args.args[1:3])
+        self.assertFalse((config_path.parent / "runtime" / "autopilot_admin.py").exists())
+
+    def test_runtime_refresh_replaces_scripts_and_preserves_paused_state(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "GITHUB_ISSUE_AUTOPILOT_STATE_ROOT": str(self.root / "state"),
+        }):
+            config_path, config, response = self.runtime_refresh_fixture()
+            runtime = config_path.parent / "runtime"
+            runtime.mkdir()
+            (runtime / "autopilot_admin.py").write_text("old admin", encoding="utf-8")
+            (runtime / "issue_watcher.py").write_text("old watcher", encoding="utf-8")
+            with mock.patch.object(ADMIN, "orca_json", return_value=response), mock.patch.object(
+                ADMIN, "close_coordinators", return_value=0
+            ):
+                result = ADMIN.refresh_runtimes()
+        self.assertEqual("refreshed", result["status"])
+        self.assertEqual(Path(ADMIN.__file__).read_bytes(),
+                         (runtime / "autopilot_admin.py").read_bytes())
+        self.assertEqual(Path(ADMIN.__file__).with_name("issue_watcher.py").read_bytes(),
+                         (runtime / "issue_watcher.py").read_bytes())
+        self.assertFalse(ADMIN.normalized_automation(response)["enabled"])
+
+    def test_runtime_refresh_rolls_back_runtime_files_on_verification_failure(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "GITHUB_ISSUE_AUTOPILOT_STATE_ROOT": str(self.root / "state"),
+        }):
+            config_path, _config, response = self.runtime_refresh_fixture()
+            runtime = config_path.parent / "runtime"
+            runtime.mkdir()
+            admin = runtime / "autopilot_admin.py"
+            watcher = runtime / "issue_watcher.py"
+            admin.write_text("old admin", encoding="utf-8")
+            watcher.write_text("old watcher", encoding="utf-8")
+            with mock.patch.object(ADMIN, "orca_json", return_value=response), mock.patch.object(
+                ADMIN, "close_coordinators", return_value=0
+            ), mock.patch.object(ADMIN, "runtime_matches_source", return_value=False), self.assertRaisesRegex(
+                ADMIN.AdminError, "rolled back"
+            ):
+                ADMIN.refresh_runtimes()
+        self.assertEqual("old admin", admin.read_text())
+        self.assertEqual("old watcher", watcher.read_text())
+
     def test_ensure_replaces_duplicate_connected_coordinators(self) -> None:
         config = self.root / "autopilot.json"
         config.write_text(json.dumps({

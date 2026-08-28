@@ -606,6 +606,109 @@ def restore_files(snapshot: dict[Path, bytes | None]) -> None:
             atomic_write(path, data)
 
 
+def runtime_refresh_plan() -> list[dict[str, Any]]:
+    source_admin = Path(__file__).resolve()
+    source_watcher = source_admin.with_name("issue_watcher.py")
+    if not source_admin.is_file() or not source_watcher.is_file():
+        raise AdminError("Autopilot runtime sources are incomplete")
+    plans: list[dict[str, Any]] = []
+    for config_path, config in installed_configs():
+        if config.get("schema_version") != 3:
+            raise AdminError(f"unsupported Autopilot schema at {config_path}")
+        repository = config["repositories"][0]
+        repository_id = repository.get("repository_id")
+        scheduler = config.get("scheduler", {})
+        identifier = scheduler.get("automation_id")
+        if scheduler.get("backend") != "orca-automation" or not identifier:
+            raise AdminError(f"Autopilot Automation identity is missing at {config_path}")
+        if not isinstance(repository_id, str) or not repository_id:
+            raise AdminError(f"Autopilot repository identity is missing at {config_path}")
+        paths = build_paths(repository_id)
+        expected_config = Path(paths["config"]).resolve()
+        if config_path.resolve() != expected_config:
+            raise AdminError(f"Autopilot configuration is outside managed state: {config_path}")
+        previous = normalized_automation(
+            orca_json(config["orca"]["cli"], "automations", "show", identifier)
+        )
+        if not previous.get("name"):
+            raise AdminError(f"Autopilot Automation cannot be read back at {config_path}")
+        runtime_paths = [Path(paths["runtime_admin"]), Path(paths["runtime_watcher"])]
+        plans.append({
+            "config_path": config_path,
+            "config": config,
+            "repository": repository.get("repository"),
+            "automation_id": identifier,
+            "enabled": bool(previous.get("enabled")),
+            "previous_automation": previous,
+            "runtime_paths": runtime_paths,
+            "runtime_snapshot": file_snapshot(runtime_paths),
+            "source_admin": source_admin,
+            "source_watcher": source_watcher,
+        })
+    return plans
+
+
+def runtime_matches_source(plan: dict[str, Any]) -> bool:
+    admin, watcher = plan["runtime_paths"]
+    return (admin.is_file() and watcher.is_file()
+            and admin.read_bytes() == plan["source_admin"].read_bytes()
+            and watcher.read_bytes() == plan["source_watcher"].read_bytes())
+
+
+def refresh_runtimes(dry_run: bool = False) -> dict[str, Any]:
+    plans = runtime_refresh_plan()
+    if dry_run:
+        return {"status": "ready", "dry_run": True, "installations": len(plans),
+                "repositories": [plan["repository"] for plan in plans]}
+    touched: list[dict[str, Any]] = []
+    try:
+        for plan in plans:
+            touched.append(plan)
+            config = plan["config"]
+            orca_json(config["orca"]["cli"], "automations", "edit",
+                      plan["automation_id"], "--disabled")
+            close_coordinators(config)
+        for plan in plans:
+            admin, watcher = plan["runtime_paths"]
+            atomic_write(admin, plan["source_admin"].read_bytes())
+            atomic_write(watcher, plan["source_watcher"].read_bytes())
+            config = plan["config"]
+            orca_json(config["orca"]["cli"], "automations", "edit",
+                      plan["automation_id"],
+                      *automation_arguments(config, plan["config_path"], plan["enabled"]))
+            if plan["enabled"]:
+                coordinator = ensure_coordinator(plan["config_path"])
+                if coordinator.get("status") not in {"started", "running"}:
+                    raise AdminError(f"Autopilot coordinator did not restart for {plan['repository']}")
+        for plan in plans:
+            config = plan["config"]
+            actual = normalized_automation(
+                orca_json(config["orca"]["cli"], "automations", "show",
+                          plan["automation_id"])
+            )
+            expected = expected_automation(config, plan["config_path"], plan["enabled"])
+            if actual != expected or not runtime_matches_source(plan):
+                raise AdminError(f"Autopilot runtime verification failed for {plan['repository']}")
+    except (AdminError, OSError, KeyError) as exc:
+        rollback_errors: list[str] = []
+        for plan in reversed(touched):
+            try:
+                config = plan["config"]
+                close_coordinators(config)
+                restore_files(plan["runtime_snapshot"])
+                orca_json(config["orca"]["cli"], "automations", "edit",
+                          plan["automation_id"],
+                          *automation_spec_arguments(plan["previous_automation"]))
+                if plan["enabled"]:
+                    ensure_coordinator(plan["config_path"])
+            except (AdminError, OSError, KeyError) as rollback_exc:
+                rollback_errors.append(f"{plan['repository']}: {rollback_exc}")
+        suffix = f"; rollback errors: {'; '.join(rollback_errors)}" if rollback_errors else ""
+        raise AdminError(f"Autopilot runtime refresh rolled back: {exc}{suffix}") from exc
+    return {"status": "refreshed", "dry_run": False, "installations": len(plans),
+            "repositories": [plan["repository"] for plan in plans]}
+
+
 def restore_legacy_launch_agent(paths: dict[str, Path | str], was_loaded: bool) -> None:
     plist_path = Path(paths["plist"])
     backup_path = Path(paths["legacy_plist_backup"])
@@ -992,6 +1095,9 @@ def parser() -> argparse.ArgumentParser:
     selector_arguments(stop_parser)
     uninstall_parser = commands.add_parser("uninstall")
     selector_arguments(uninstall_parser)
+    refresh = commands.add_parser("refresh-runtimes")
+    refresh.add_argument("--all", action="store_true", required=True)
+    refresh.add_argument("--dry-run", action="store_true")
     ensure = commands.add_parser("ensure")
     ensure.add_argument("--config", type=Path, required=True)
     precheck = commands.add_parser("automation-precheck")
@@ -1026,6 +1132,8 @@ def main() -> int:
             result = stop(args.repo_path, args.repository, args.repository_id)
         elif args.operation == "uninstall":
             result = uninstall(args.repo_path, args.repository, args.repository_id)
+        elif args.operation == "refresh-runtimes":
+            result = refresh_runtimes(args.dry_run)
         elif args.operation == "doctor":
             result = doctor(args.repo_path)
         elif args.operation == "status":
