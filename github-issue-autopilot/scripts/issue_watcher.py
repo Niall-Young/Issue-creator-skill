@@ -828,15 +828,15 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
     if repository is None:
         ledger.finish(run["node_id"], attempt, "blocked", summary="repository removed from policy")
         return {"url": run["url"], "status": "blocked"}
-    current = {item["id"]: item for item in list_issues(repository, github_login())}
-    issue = current.get(run["node_id"])
     repair_run_id = str(uuid.uuid4())
     run["run_id"] = repair_run_id
-    if issue is None:
-        ledger.finish(run["node_id"], attempt, "blocked", summary="Issue is no longer open or eligible",
-                      run_id=repair_run_id)
-        return {"url": run["url"], "status": "blocked"}
     try:
+        current = {item["id"]: item for item in list_issues(repository, github_login())}
+        issue = current.get(run["node_id"])
+        if issue is None:
+            ledger.finish(run["node_id"], attempt, "blocked", summary="Issue is no longer open or eligible",
+                          run_id=repair_run_id)
+            return {"url": run["url"], "status": "blocked"}
         task_id = create_orca_task(config, run_id, run)
         agent = select_agent(issue, config)
         response = orca_call(

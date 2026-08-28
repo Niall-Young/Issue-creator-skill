@@ -210,6 +210,17 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("task-1", attempt["orca_task_id"])
         self.assertEqual("repo::/tmp/blocked", attempt["orca_worktree_id"])
 
+    def test_dispatch_preflight_failure_does_not_leave_claim_stuck(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        with mock.patch.object(WATCHER, "github_login", side_effect=WATCHER.WatcherError("request: EOF")), \
+                mock.patch.object(WATCHER, "create_blocked_worktree", return_value={}):
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+        self.assertEqual("needs-human", result["status"])
+        self.assertEqual("needs-human", ledger.snapshot()["issues"][0]["status"])
+
     def test_completed_orca_worker_requires_verified_receipt(self) -> None:
         config = self.config()
         ledger = self.ledger()
