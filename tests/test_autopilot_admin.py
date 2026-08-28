@@ -48,11 +48,12 @@ class AutopilotAdminTests(unittest.TestCase):
             "launch_label": "com.example.autopilot.123",
             "stdout": self.root / "stdout.log",
             "stderr": self.root / "stderr.log",
+            "runtime_admin": self.root / "runtime" / "autopilot_admin.py",
         }
         config = self.root / "config.json"
         value = plistlib.loads(ADMIN.build_plist(paths, config))
         self.assertEqual(180, value["StartInterval"])
-        self.assertIn("once", value["ProgramArguments"])
+        self.assertIn("ensure", value["ProgramArguments"])
         self.assertEqual(str(config), value["ProgramArguments"][-1])
         plist_path = self.root / "autopilot.plist"
         plist_path.write_bytes(ADMIN.build_plist(paths, config))
@@ -60,15 +61,17 @@ class AutopilotAdminTests(unittest.TestCase):
                               stderr=subprocess.PIPE)
         self.assertEqual(0, lint.returncode, lint.stderr)
 
-    def test_config_defaults_to_agent_label_and_local_only_publication(self) -> None:
+    def test_config_uses_orca_and_user_selected_default_agent(self) -> None:
         paths = {"database": self.root / "state.sqlite3"}
         value = ADMIN.build_config(
-            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/codex",
-            "agent-ready", paths, "2026-08-28T00:00:00+00:00",
+            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
+            "agent-ready", paths, "2026-08-28T00:00:00+00:00", "claude", ["claude", "codex"],
         )
         self.assertEqual(["agent-ready"], value["repositories"][0]["labels"])
         self.assertEqual("never", value["policy"]["publication"])
-        self.assertIn("--ephemeral", value["executor"]["argv"])
+        self.assertEqual("claude", value["orca"]["default_agent"])
+        self.assertEqual(["claude", "codex"], value["orca"]["allowed_agents"])
+        self.assertNotIn("executor", value)
 
 
 if __name__ == "__main__":

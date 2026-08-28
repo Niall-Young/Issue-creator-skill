@@ -1,8 +1,8 @@
 # Run automatically with launchd
 
-The preferred setup is `python3 scripts/autopilot_admin.py install --repo-path /absolute/repository/root`. It generates, validates, loads, and kickstarts a repository-specific user LaunchAgent. The manual template below is for unsupported executors or debugging.
+The preferred setup is `python3 scripts/autopilot_admin.py install --repo-path /absolute/repository/root --agent codex`. It generates, validates, loads, and kickstarts a repository-specific user LaunchAgent.
 
-Each LaunchAgent runs one detection-and-execution tick every three minutes. `launchd` does not overlap the same job, while the SQLite PID/lease gate also prevents a manual second watcher from dispatching duplicate work.
+The LaunchAgent never launches hidden repair workers. Every three minutes it runs the copied administrator from the repository-specific state directory and ensures that Orca has exactly one connected `Issue Autopilot Coordinator` terminal. The coordinator polls Issues and uses Orca Orchestration to maintain up to three visible child worktrees.
 
 Save the following as `~/Library/LaunchAgents/com.example.github-issue-autopilot.plist`, replacing every example path. Keep the configuration and SQLite state database outside managed repositories.
 
@@ -16,10 +16,10 @@ Save the following as `~/Library/LaunchAgents/com.example.github-issue-autopilot
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/absolute/path/github-issue-autopilot/scripts/issue_watcher.py</string>
-    <string>once</string>
-    <string>--config</string>
-    <string>/absolute/path/autopilot.json</string>
+    <string>/absolute/state/path/runtime/autopilot_admin.py</string>
+    <string>ensure</string>
+    <string>--repo-path</string>
+    <string>/absolute/path/to/repository</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -41,10 +41,10 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.github-issue
 launchctl kickstart -k gui/$(id -u)/com.example.github-issue-autopilot
 ```
 
-Inspect the watcher with `status` and the configured log files. To stop it without deleting state:
+Inspect the watcher with `status`, `orca worktree ps --json`, and `orca orchestration task-list --json`. The administrator copies its deterministic runtime scripts outside Desktop so launchd does not need direct background access to a TCC-protected checkout. To stop it without deleting state, use `autopilot_admin.py stop`; it unloads launchd and closes only the exact coordinator terminal.
 
 ```sh
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.example.github-issue-autopilot.plist
 ```
 
-`launchd` does not start a second instance of the same job while the previous tick is still running. SQLite claims provide the additional idempotency boundary across manual and scheduled invocations.
+`launchd` does not start a second instance of the same ensure job while the previous tick is still running. The exact coordinator title plus SQLite Issue/Orca identities provide the additional idempotency boundary across restarts.

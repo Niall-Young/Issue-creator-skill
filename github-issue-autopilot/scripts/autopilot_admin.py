@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -91,43 +92,73 @@ def build_paths(repository_id: str) -> dict[str, Path | str]:
         "database": root / "state.sqlite3",
         "stdout": root / "launchd.stdout.log",
         "stderr": root / "launchd.stderr.log",
+        "runtime_admin": root / "runtime" / "autopilot_admin.py",
+        "runtime_watcher": root / "runtime" / "issue_watcher.py",
         "launch_label": label,
         "plist": launch_agents_dir() / f"{label}.plist",
     }
 
 
-def build_config(repo: Path, metadata: dict[str, Any], login: str, codex: str, label: str,
-                 paths: dict[str, Path | str], activated_at: str) -> dict[str, Any]:
+def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, label: str,
+                 paths: dict[str, Path | str], activated_at: str, default_agent: str,
+                 allowed_agents: list[str]) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "state_db": str(paths["database"]),
         "poll_interval_seconds": 180,
         "lease_timeout_seconds": 3000,
         "max_attempts": 2,
-        "max_dispatch_per_poll": 1,
+        "max_concurrent_workers": 3,
         "policy": {"scope_approval": "eligible-issue", "publication": "never", "max_risk": "medium"},
         "repositories": [{
             "repository": metadata["nameWithOwner"], "repository_id": metadata["id"],
             "repo_path": str(repo), "author": login, "activate_after": activated_at, "labels": [label],
         }],
-        "executor": {"timeout_seconds": 2700, "argv": [
-            codex, "exec", "--ephemeral", "--sandbox", "workspace-write", "--approve-for-me",
-            "--skip-git-repo-check", "-C", "{repo_path}", "-",
-        ]},
+        "orca": {"cli": orca, "default_agent": default_agent,
+                 "allowed_agents": allowed_agents, "setup": "run"},
     }
 
 
 def build_plist(paths: dict[str, Path | str], config_path: Path) -> bytes:
-    watcher = Path(__file__).resolve().with_name("issue_watcher.py")
     value = {
         "Label": paths["launch_label"],
-        "ProgramArguments": [sys.executable, str(watcher), "once", "--config", str(config_path)],
+        "ProgramArguments": [sys.executable, str(paths["runtime_admin"]), "ensure",
+                             "--config", str(config_path)],
         "RunAtLoad": True,
         "StartInterval": 180,
         "StandardOutPath": str(paths["stdout"]),
         "StandardErrorPath": str(paths["stderr"]),
     }
     return plistlib.dumps(value, fmt=plistlib.FMT_XML, sort_keys=False)
+
+
+def orca_json(orca: str, *args: str) -> dict[str, Any]:
+    raw = checked([orca, *args, "--json"])
+    value = json.loads(raw)
+    if value.get("ok") is False:
+        raise AdminError((value.get("error") or {}).get("message") or "Orca command failed")
+    return value
+
+
+def ensure_coordinator(config_path: Path) -> dict[str, Any]:
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    orca = config["orca"]["cli"]
+    status = orca_json(orca, "status")
+    if status.get("result", {}).get("runtime", {}).get("state") != "ready":
+        raise AdminError("Orca runtime is not ready")
+    repository = config["repositories"][0]
+    worktree = f"path:{repository['repo_path']}"
+    terminals = orca_json(orca, "terminal", "list", "--worktree", worktree)
+    existing = [item for item in terminals.get("result", {}).get("terminals", [])
+                if item.get("title") == "Issue Autopilot Coordinator" and item.get("connected")]
+    if existing:
+        return {"status": "running", "terminal": existing[0].get("handle")}
+    paths = build_paths(repository["repository_id"])
+    argv = [sys.executable, str(paths["runtime_watcher"]), "run", "--config", str(config_path)]
+    created = orca_json(orca, "terminal", "create", "--worktree", worktree,
+                        "--title", "Issue Autopilot Coordinator", "--command", shlex.join(argv))
+    terminal = created.get("result", {}).get("terminal", created.get("result", {}))
+    return {"status": "started", "terminal": terminal.get("handle")}
 
 
 def ensure_label(repository: str, label: str) -> bool:
@@ -139,26 +170,31 @@ def ensure_label(repository: str, label: str) -> bool:
     return True
 
 
-def install(repo_path: Path, label: str, load: bool = True) -> dict[str, Any]:
+def install(repo_path: Path, label: str, default_agent: str, allowed_agents: list[str],
+            load: bool = True) -> dict[str, Any]:
     if sys.platform != "darwin":
         raise AdminError("automatic installation currently requires macOS launchd")
     repo = repository_root(repo_path)
     if command(["gh", "auth", "status"]).returncode:
         raise AdminError("GitHub CLI is not authenticated")
-    codex = shutil.which("codex")
-    if not codex:
-        raise AdminError("codex executable was not found")
+    orca = shutil.which("orca")
+    if not orca:
+        raise AdminError("Orca CLI was not found")
+    allowed_agents = list(dict.fromkeys([default_agent, *allowed_agents]))
     metadata = repository_metadata(repo)
     login = checked(["gh", "api", "user", "--jq", ".login"])
     paths = build_paths(metadata["id"])
     activated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
-    config = build_config(repo, metadata, login, str(Path(codex).resolve()), label, paths, activated_at)
+    config = build_config(repo, metadata, login, str(Path(orca).resolve()), label, paths, activated_at,
+                          default_agent, allowed_agents)
     label_created = ensure_label(metadata["nameWithOwner"], label)
     config_path, plist_path = Path(paths["config"]), Path(paths["plist"])
     try:
         atomic_write(config_path, (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode())
+        atomic_write(Path(paths["runtime_admin"]), Path(__file__).read_bytes())
+        atomic_write(Path(paths["runtime_watcher"]), Path(__file__).resolve().with_name("issue_watcher.py").read_bytes())
         atomic_write(plist_path, build_plist(paths, config_path))
-        marker = {"schema_version": 1, "config": str(config_path), "label": label,
+        marker = {"schema_version": 2, "config": str(config_path), "label": label,
                   "repository_id": metadata["id"], "repository": metadata["nameWithOwner"]}
         atomic_write(git_common_dir(repo) / "github-issue-autopilot.json",
                      (json.dumps(marker, ensure_ascii=False, indent=2) + "\n").encode())
@@ -173,7 +209,8 @@ def install(repo_path: Path, label: str, load: bool = True) -> dict[str, Any]:
         raise AdminError(f"{exc}{suffix}") from exc
     return {"status": "installed", "repository": metadata["nameWithOwner"], "label": label,
             "label_created": label_created, "config": str(config_path), "plist": str(plist_path),
-            "launch_label": paths["launch_label"], "loaded": load}
+            "launch_label": paths["launch_label"], "loaded": load, "default_agent": default_agent,
+            "allowed_agents": allowed_agents}
 
 
 def marker(repo_path: Path) -> dict[str, Any]:
@@ -206,6 +243,16 @@ def stop(repo_path: Path) -> dict[str, Any]:
             raise AdminError(bootout.stderr.strip() or "failed to stop LaunchAgent")
         disabled_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(plist_path, disabled_path)
+    try:
+        config = json.loads(Path(info["config"]).read_text(encoding="utf-8"))
+        orca = config.get("orca", {}).get("cli")
+        if orca:
+            terminals = orca_json(orca, "terminal", "list", "--worktree", f"path:{repository_root(repo_path)}")
+            for item in terminals.get("result", {}).get("terminals", []):
+                if item.get("title") == "Issue Autopilot Coordinator" and item.get("handle"):
+                    orca_json(orca, "terminal", "close", "--terminal", item["handle"])
+    except (AdminError, OSError, json.JSONDecodeError):
+        pass
     return {"status": "stopped", "repository": info["repository"], "state_preserved": True,
             "disabled_plist": str(disabled_path) if disabled_path.exists() else None}
 
@@ -216,10 +263,15 @@ def parser() -> argparse.ArgumentParser:
     install_parser = commands.add_parser("install")
     install_parser.add_argument("--repo-path", type=Path, default=Path.cwd())
     install_parser.add_argument("--label", default="agent-ready")
+    install_parser.add_argument("--agent", default="codex", help="repository default Orca agent ID")
+    install_parser.add_argument("--allow-agent", action="append", default=[],
+                                help="additional agent:<id> label override allowed for this repository")
     install_parser.add_argument("--no-load", action="store_true", help="write and validate without loading launchd")
     for name in ("doctor", "status", "stop"):
         sub = commands.add_parser(name)
         sub.add_argument("--repo-path", type=Path, default=Path.cwd())
+    ensure = commands.add_parser("ensure")
+    ensure.add_argument("--config", type=Path, required=True)
     retry = commands.add_parser("retry")
     retry.add_argument("--repo-path", type=Path, default=Path.cwd())
     retry.add_argument("--issue-url", required=True)
@@ -235,7 +287,9 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.operation == "install":
-            result = install(args.repo_path, args.label, not args.no_load)
+            result = install(args.repo_path, args.label, args.agent, args.allow_agent, not args.no_load)
+        elif args.operation == "ensure":
+            result = ensure_coordinator(args.config)
         elif args.operation == "stop":
             result = stop(args.repo_path)
         elif args.operation in {"doctor", "status"}:

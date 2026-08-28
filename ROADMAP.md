@@ -13,11 +13,11 @@
 
 - `github-issue-handoff`：把仓库上下文与用户意图交接成 Agent 可执行的 Issue。创建 Issue 不会自动触发代码修改。
 - `github-issue-repair`：读取既有 Issue，提出工作包与验证方案，在获得授权后修改代码，并可在再次授权后发布 draft PR。
-- `github-issue-autopilot`：按可信本地策略自动发现 owner 创建的新 Issue，并在全新 Agent 进程中调用 repair 工作流。
+- `github-issue-autopilot`：按可信本地策略自动发现 owner 创建的新 Issue，并在 Orca 可见子 worktree 中调用 repair 工作流。
 
 三者可以共享 URL 解析、GitHub 读取、仓库上下文采集与结构化 Issue 数据，但必须拥有不同的触发条件、授权边界、状态与成功标准。
 
-当前仓库已包含三个 Skill、工作包契约、审批状态机、修复账本和 SQLite 自动调度账本。单机轮询、单 Issue 串行自动领取已实现；仓库级小批次、多机协调、自动发布与有限并发仍需真实验收数据解锁。
+当前仓库已包含三个 Skill、工作包契约、审批状态机、修复账本和 SQLite 自动调度账本。单机轮询、Orca 可见任务、可配置 Agent 与最多三任务并发已实现；多机协调和自动发布仍需真实验收数据解锁。
 
 ### 核心原则
 
@@ -75,16 +75,16 @@
 已完成的单机基础：
 
 - `github-issue-autopilot` 可为当前 macOS 仓库安装独立 LaunchAgent，用 `gh` 只读轮询并按作者、新建游标与 `agent-ready` 标签筛选。
-- SQLite WAL 账本用 node ID 去重并为每次 worktree 保存独立 attempt；事务领取与 PID/租约阻止重叠 worker，过期 worker 停在 `needs-human` 而非盲目重派。
-- 成功 attempt 以 Git 回读验证 worktree、`repair/` 分支和 base/head SHA 后进入 `ready-for-review`；人工可明确本地合并，或舍弃精确记录的 worktree 后创建新 attempt。
+- SQLite WAL 账本用 node ID 去重并为每次 worktree 保存独立 attempt；事务领取与 Orca Task/Dispatch/worktree 标识阻止重复 worker，失败任务停在可见的 `needs-human` 而非盲目重派。
+- 成功 attempt 以 Git 回读验证 Orca worktree、记录分支和 base/head SHA 后进入 `ready-for-review`；人工可明确本地合并，或舍弃精确记录的 Orca worktree 后创建新 attempt。
 - 符合策略的 Issue 只预授权一个低/中风险本地工作包；远程发布固定为 `never`，merge 始终由人完成。
-- `launchd` 可定时运行 `once`；无有效 `AUTOPILOT_RESULT` 回执不得判定成功。
+- `launchd` 只保证 Orca 协调器终端存活；协调器一次记录全部合格 Issue，并维持最多三个可见 worker。无有效 `worker_done` 与 `AUTOPILOT_RESULT` 回执不得判定成功。
 
-只有上述串行流程在真实仓库中稳定后才继续开放：
+仍待后续开放：
 
 - 从仓库 URL 选择有上限的批次，用户确认后执行。
 - 根据 `blocked-by`、`duplicate-of`、`same-root-cause`、`conflicts-with` 与共享契约建立依赖图。
-- 只对低交互风险工作包进行有限并发；每个 worktree 独立，集成后重新验证。
+- 根据实际路径重叠和共享契约动态降低并发；每个 worktree 独立，集成后重新验证。
 - 工作包实际触及范围与预测不符时，暂停相关任务并重新规划。
 
 验收：并发不会提高回归逸出、冲突返工或人工审查时间；否则退回串行。
@@ -124,11 +124,11 @@ Keep three composable workflows with separate permission surfaces:
 
 - `github-issue-handoff`: turns repository context and user intent into an agent-ready Issue. Creating an Issue never triggers code changes.
 - `github-issue-repair`: reads an existing Issue, proposes work packages and verification, modifies code after approval, and may publish a draft PR after a separate publication authorization.
-- `github-issue-autopilot`: discovers new owner-authored Issues under trusted local policy and invokes the repair workflow in a fresh Agent process.
+- `github-issue-autopilot`: discovers new owner-authored Issues under trusted local policy and invokes the repair workflow in visible Orca child worktrees.
 
 They may share URL parsing, GitHub reads, repository context collection, and structured Issue data, but they must retain distinct triggers, authorization boundaries, state, and success criteria.
 
-The repository now includes all three Skills, the work-package contract, approval state machine, repair ledger, and SQLite dispatch ledger. Single-machine polling and sequential automatic claims are implemented; repository batches, multi-runner coordination, automatic publication, and bounded concurrency still require real acceptance evidence.
+The repository now includes all three Skills, the work-package contract, approval state machine, repair ledger, and SQLite dispatch ledger. Single-machine polling, visible Orca tasks, configurable Agents, and up to three concurrent workers are implemented; multi-runner coordination and automatic publication still require real acceptance evidence.
 
 ### Core Principles
 
@@ -184,16 +184,16 @@ Exit criterion: remote actions are traceable and resumable without duplicate PRs
 Implemented single-machine foundation:
 
 - `github-issue-autopilot` can install a repository-specific macOS LaunchAgent, performs read-only `gh` polling, and filters by author, new-Issue cursor, and the `agent-ready` label.
-- A SQLite WAL ledger deduplicates by node ID and records each worktree as a separate attempt. Transactional claims plus PID/lease checks block overlapping workers; stale workers stop at `needs-human` instead of relaunching blindly.
-- A successful attempt becomes `ready-for-review` only after Git validates its worktree, `repair/` branch, and base/head SHAs. A human can explicitly merge it locally or discard the exact worktree before creating another attempt.
+- A SQLite WAL ledger deduplicates by node ID and records each worktree as a separate attempt. Transactional claims plus Orca Task/Dispatch/worktree identities block duplicate workers; failures stop visibly at `needs-human` instead of relaunching blindly.
+- A successful attempt becomes `ready-for-review` only after Git validates its Orca worktree, recorded branch, and base/head SHAs. A human can explicitly merge it locally or discard the exact Orca worktree before creating another attempt.
 - An eligible Issue pre-authorizes only one low/medium-risk local work package. Remote publication is fixed to `never`, and merge remains human-only.
-- `launchd` can schedule `once`; a run without a valid `AUTOPILOT_RESULT` receipt is never reported as success.
+- `launchd` only keeps the Orca coordinator terminal alive. The coordinator records every eligible Issue and maintains up to three visible workers; neither missing `worker_done` nor a missing `AUTOPILOT_RESULT` can be reported as success.
 
-Enable the following only after the sequential flow is reliable in real repositories:
+Still to be enabled:
 
 - Select a capped repository-level batch, then require user confirmation.
 - Build a graph using `blocked-by`, `duplicate-of`, `same-root-cause`, `conflicts-with`, and shared-contract relationships.
-- Run only low-interaction-risk packages concurrently; isolate every worktree and reverify the integrated result.
+- Dynamically reduce concurrency for overlapping paths or shared contracts; isolate every worktree and reverify the integrated result.
 - Pause and replan when actual touched scope differs from predictions.
 
 Exit criterion: concurrency does not increase regression escapes, conflict rework, or human review time; otherwise return to sequential execution.

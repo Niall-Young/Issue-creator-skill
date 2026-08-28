@@ -1,23 +1,28 @@
 # Autopilot configuration
 
-For normal macOS/Codex setup, run the idempotent administrator from the installed Skill:
+For normal macOS/Orca setup, run the idempotent administrator from the installed Skill:
 
 ```sh
-python3 scripts/autopilot_admin.py install --repo-path /absolute/repository/root
+python3 scripts/autopilot_admin.py install \
+  --repo-path /absolute/repository/root \
+  --agent codex \
+  --allow-agent claude
 ```
 
-It creates the missing `agent-ready` GitHub label, a repository-specific state directory under `~/.local/state/github-issue-autopilot/`, a validated user LaunchAgent, and an untracked marker in the Git common directory. Use the manual JSON form below for other executors or platforms.
+It creates the missing `agent-ready` GitHub label, a repository-specific state directory under `~/.local/state/github-issue-autopilot/`, a validated user LaunchAgent, and an untracked marker in the Git common directory. The LaunchAgent only ensures that Orca contains one visible `Issue Autopilot Coordinator` terminal. That terminal owns polling and supervised worker dispatch; no hidden Agent CLI fallback is permitted.
 
-Use an absolute path for manual JSON configuration and keep it outside the repository. Version 1 has this shape:
+`--agent` is the repository default. Each `--allow-agent ID` adds an agent that an Issue may select with one `agent:ID` label. No agent label uses the default; exactly one label overrides it; conflicting, disallowed, or unavailable choices stop visibly at `needs-human`.
+
+Version 2 has this shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "state_db": "/Users/me/.local/state/github-issue-autopilot/state.sqlite3",
   "poll_interval_seconds": 180,
   "lease_timeout_seconds": 3000,
   "max_attempts": 2,
-  "max_dispatch_per_poll": 1,
+  "max_concurrent_workers": 3,
   "policy": {
     "scope_approval": "eligible-issue",
     "publication": "never",
@@ -33,34 +38,19 @@ Use an absolute path for manual JSON configuration and keep it outside the repos
       "labels": ["agent-ready"]
     }
   ],
-  "executor": {
-    "timeout_seconds": 2700,
-    "argv": [
-      "/Users/me/.local/bin/codex",
-      "exec",
-      "--ephemeral",
-      "--sandbox",
-      "workspace-write",
-      "--approve-for-me",
-      "--skip-git-repo-check",
-      "-C",
-      "{repo_path}",
-      "-"
-    ]
+  "orca": {
+    "cli": "/Users/me/.local/bin/orca",
+    "default_agent": "codex",
+    "allowed_agents": ["codex", "claude"],
+    "setup": "run"
   }
 }
 ```
 
-`author` and `activate_after` are required. `@me` is resolved through the authenticated GitHub CLI. The activation cutoff and advancing per-repository poll cursor prevent the first run from sweeping an old backlog or a later label edit from importing an older Issue. `repository_id` is optional but recommended to detect a renamed or transferred repository. Every configured label must be present; the administrator defaults to `agent-ready`.
+`author` and `activate_after` are required. `@me` resolves through the authenticated GitHub CLI. The activation cutoff and advancing per-repository poll cursor prevent the first run from sweeping an old backlog or a later label edit from importing an older Issue. `repository_id` is optional but recommended to detect a renamed or transferred repository. Every configured intake label must be present.
 
-Supported `argv` placeholders are `{repository}`, `{repo_path}`, `{issue_url}`, and `{issue_number}`. The generated prompt is sent on stdin; Issue title or body never becomes an argument. The executable must be a fresh-session command such as Codex `exec --ephemeral` or Claude Code with session persistence disabled.
+`max_concurrent_workers` accepts 1–3. Polling records every eligible Issue; the coordinator starts only the available number of Orca workers and fills a free slot on a later cycle. Orca is the source of truth for Task, Dispatch, agent terminal, worktree lineage, comments, and workspace status. SQLite stores immutable Issue node IDs, attempt history, and those Orca IDs for recovery.
 
-Use an absolute executor path when running under `launchd`, whose default `PATH` is intentionally small. The Codex example uses `--approve-for-me` so an unattended run can pass ordinary workspace-write approvals through automatic review; it does not authorize the remote operations forbidden by the Autopilot policy.
+Workers run in visible `new-child` worktrees under the configured Orca project. They update comments at investigation, implementation, and verification checkpoints. A successful worker sends Orca `worker_done` and leaves one `AUTOPILOT_RESULT` in its final transcript. The watcher reads the preserved worker transcript and independently validates the worktree, branch, repair ledger, and base/head SHAs before marking it `ready-for-review`.
 
-`lease_timeout_seconds` must be greater than `executor.timeout_seconds`. `publication` currently accepts only `never`; automatic draft-PR publication should be added only with a separate credential and receipt design. The state database and logs are local runtime artifacts, not repository files.
-
-The watcher stores immutable GitHub Issue node IDs and separate attempt rows in a SQLite WAL ledger. `open` matters only at initial discovery and pre-execution revalidation. Repeated polls, body edits, later label changes, reopened Issues, running workers, and work waiting for review do not enqueue another run. A dead stale worker stops at `needs-human`; use an explicit retry for another numbered attempt.
-
-Successful attempts remain `ready-for-review` with their isolated worktree and branch. Accepting one requires a clean, explicitly named local target branch and never pushes. Rejecting one with `retry --discard-worktree` removes only the exact recorded worktree and `repair/` branch, records the old attempt as rejected, and queues a new attempt number.
-
-The generated child prompt identifies the verified eligibility policy, invokes `$github-issue-repair` with the canonical Issue URL, forbids remote writes, and requires a structured `AUTOPILOT_RESULT` containing the run ID, worktree, branch, and base/head SHAs. The watcher validates those artifacts with Git before declaring the attempt ready for review. On an ordinary macOS user account this is reduced isolation: a fresh process and Agent sandbox do not by themselves protect every unrelated local secret. Use a dedicated low-privilege account or stronger sandbox for hostile repositories.
+Successful worktrees remain `in-review` until explicit local acceptance. Accepting requires a clean, explicitly named target branch and never pushes. Retrying with `--discard-worktree` removes only the exact recorded Orca worktree after its Dispatch is no longer live. Remote publication remains fixed to `never`.

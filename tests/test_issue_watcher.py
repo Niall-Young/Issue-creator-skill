@@ -71,11 +71,11 @@ class IssueWatcherTests(unittest.TestCase):
 
     def config(self) -> dict:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "state_db": self.db,
             "lease_timeout_seconds": 20,
             "max_attempts": 2,
-            "max_dispatch_per_poll": 1,
+            "max_concurrent_workers": 3,
             "policy": {"scope_approval": "eligible-issue", "publication": "never", "max_risk": "medium"},
             "repositories": [{
                 "repository": "owner/repo",
@@ -84,14 +84,8 @@ class IssueWatcherTests(unittest.TestCase):
                 "labels": [],
                 "activate_after": dt.datetime(2026, 8, 27, tzinfo=dt.timezone.utc),
             }],
-            "executor": {
-                "timeout_seconds": 10,
-                "argv": [
-                    sys.executable,
-                    "-c",
-                    "import sys; sys.stdin.read(); print('AUTOPILOT_RESULT: {\"status\":\"succeeded\",\"summary\":\"verified\"}')",
-                ],
-            },
+            "orca": {"cli": sys.executable, "default_agent": "codex",
+                     "allowed_agents": ["codex", "claude"], "setup": "run"},
         }
 
     def test_node_id_is_idempotent_and_edits_do_not_retrigger(self) -> None:
@@ -146,47 +140,107 @@ class IssueWatcherTests(unittest.TestCase):
             eligible = WATCHER.list_issues(repository, "owner")
         self.assertEqual(["new"], [issue["id"] for issue in eligible])
 
-    def test_work_once_requires_a_valid_receipt_for_success(self) -> None:
+    def test_claim_many_starts_three_and_leaves_the_fourth_queued(self) -> None:
+        ledger = self.ledger()
+        for number in range(1, 5):
+            ledger.enqueue(self.issue(f"I_kwDO{number}", number))
+        claimed = ledger.claim_many(3)
+        self.assertEqual([1, 2, 3], [item["issue_number"] for item in claimed])
+        self.assertEqual("queued", ledger.snapshot()["issues"][3]["status"])
+
+    def test_issue_agent_label_overrides_repository_default(self) -> None:
+        config = self.config()
+        self.assertEqual("codex", WATCHER.select_agent({"labels": []}, config))
+        self.assertEqual("claude", WATCHER.select_agent(
+            {"labels": [{"name": "agent:claude"}]}, config))
+        with self.assertRaisesRegex(WATCHER.WatcherError, "multiple agent labels"):
+            WATCHER.select_agent(
+                {"labels": [{"name": "agent:codex"}, {"name": "agent:claude"}]}, config)
+
+    def test_dispatch_creates_orca_child_worker_with_selected_agent(self) -> None:
         config = self.config()
         ledger = self.ledger()
         issue = self.issue()
         ledger.enqueue(issue)
+        claimed = ledger.claim_next()
         eligible = dict(issue, author={"login": "owner"}, labels=[])
         with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
             WATCHER, "list_issues", return_value=[eligible]
         ), mock.patch.object(
-            WATCHER, "verified_receipt", return_value=("ready-for-review", "verified", {})
-        ):
-            result = WATCHER.work_once(config, ledger)
-        self.assertEqual("ready-for-review", result["status"])
-        self.assertEqual("ready-for-review", ledger.snapshot()["issues"][0]["status"])
+            WATCHER, "create_orca_task", return_value="task-1"
+        ), mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"dispatch": {"id": "dispatch-1"}, "worktree": {
+                "id": "repo::/tmp/issue-1", "path": "/tmp/issue-1", "branch": "refs/heads/issue-1"
+            }}},
+            {"ok": True, "result": {}},
+        ]):
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+        self.assertEqual("running", result["status"])
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("codex", attempt["agent_id"])
+        self.assertEqual("dispatch-1", attempt["orca_dispatch_id"])
 
-    def test_nonzero_executor_exit_cannot_be_reported_as_success(self) -> None:
+    def test_unavailable_agent_still_creates_visible_blocked_worktree(self) -> None:
         config = self.config()
-        config["executor"]["argv"] = [
-            sys.executable,
-            "-c",
-            "print('AUTOPILOT_RESULT: {\"status\":\"succeeded\",\"summary\":\"claimed success\"}'); raise SystemExit(3)",
-        ]
+        config["orca"]["allowed_agents"] = ["codex"]
         ledger = self.ledger()
         issue = self.issue()
         ledger.enqueue(issue)
-        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        claimed = ledger.claim_next()
+        eligible = dict(issue, author={"login": "owner"}, labels=[{"name": "agent:claude"}])
         with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
             WATCHER, "list_issues", return_value=[eligible]
-        ):
-            result = WATCHER.work_once(config, ledger)
-        self.assertEqual("failed", result["status"])
-        self.assertIn("exited 3", result["summary"])
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-1"
+        ), mock.patch.object(WATCHER, "create_blocked_worktree", return_value={
+            "id": "repo::/tmp/blocked", "path": "/tmp/blocked", "branch": "refs/heads/blocked"
+        }):
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+        self.assertEqual("needs-human", result["status"])
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("task-1", attempt["orca_task_id"])
+        self.assertEqual("repo::/tmp/blocked", attempt["orca_worktree_id"])
+
+    def test_completed_orca_worker_requires_verified_receipt(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        worktree = self.root / "orca-worktree"
+        branch = "issue-1-attempt-1"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True, stdout=subprocess.PIPE,
+        )
+        sha = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], check=True,
+                             text=True, stdout=subprocess.PIPE).stdout.strip()
+        evidence = self.repair_evidence(worktree, branch, sha, sha)
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=evidence["run_id"], agent_id="codex",
+            orca_task_id="task-1", orca_dispatch_id="dispatch-1", orca_worktree_id="repo::worktree",
+            worktree_path=str(worktree), branch=branch,
+        )
+        receipt = "AUTOPILOT_RESULT: " + json.dumps({
+            "status": "ready-for-review", "summary": "verified", **evidence,
+        })
+        with mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"dispatch": {"status": "completed", "outcome": "succeeded"}}},
+            {"ok": True, "result": {"rows": [{"text": receipt}]}},
+            {"ok": True, "result": {}},
+            {"ok": True, "result": {}},
+        ]):
+            completed = WATCHER.reconcile_workers(config, ledger)
+        self.assertEqual("ready-for-review", completed[0]["status"], completed)
+        self.assertEqual("ready-for-review", ledger.snapshot()["issues"][0]["status"])
 
     def test_load_config_rejects_missing_activation_cutoff(self) -> None:
         path = self.root / "config.json"
         path.write_text(json.dumps({
-            "schema_version": 1,
+            "schema_version": 2,
             "state_db": str(self.db),
             "policy": {"scope_approval": "eligible-issue", "publication": "never"},
             "repositories": [{"repository": "owner/repo", "repo_path": str(self.repo), "author": "@me"}],
-            "executor": {"timeout_seconds": 10, "argv": [sys.executable]},
+            "orca": {"cli": sys.executable, "default_agent": "codex", "allowed_agents": ["codex"]},
             "lease_timeout_seconds": 20,
         }), encoding="utf-8")
         with self.assertRaisesRegex(WATCHER.WatcherError, "activate_after"):
