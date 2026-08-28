@@ -105,9 +105,11 @@ class IssueWatcherTests(unittest.TestCase):
         ledger.assign_orca(
             claimed["node_id"], claimed["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
             orca_task_id="task-1", orca_dispatch_id="dispatch-1",
+            orca_worktree_id="repo::/tmp/invalid-output", worktree_path="/tmp/invalid-output",
         )
         with mock.patch.object(WATCHER, "orca_call", side_effect=[
             show, {"ok": True, "result": {"rows": [{"text": receipt}]}},
+            {"ok": True, "result": {}},
             {"ok": True, "result": {}},
         ]):
             completed = WATCHER.reconcile_workers(config, ledger)
@@ -263,6 +265,214 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("dispatch-1", attempt["orca_dispatch_id"])
         self.assertEqual(dt.datetime.min.replace(tzinfo=dt.timezone.utc),
                          list_issues.call_args.kwargs["created_after"])
+
+    def test_orca_identities_cannot_be_reused_by_another_attempt_or_issue(self) -> None:
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        first = ledger.claim_next()
+        identities = {
+            "run_id": str(uuid.uuid4()), "agent_id": "codex", "orca_task_id": "task-1",
+            "orca_dispatch_id": "dispatch-1", "orca_worktree_id": "repo::/tmp/issue-1",
+            "worktree_path": "/tmp/issue-1", "branch": "issue-1-attempt-1",
+        }
+        ledger.assign_orca(first["node_id"], first["attempt_number"], **identities)
+        ledger.finish(first["node_id"], first["attempt_number"], "needs-human", summary="retry")
+
+        ledger.enqueue(self.issue("I_kwDO2", 2))
+        second = ledger.claim_next()
+        for name in ("orca_task_id", "orca_dispatch_id", "orca_worktree_id", "worktree_path"):
+            candidate = {
+                **identities, "run_id": str(uuid.uuid4()), "orca_task_id": "task-2",
+                "orca_dispatch_id": "dispatch-2", "orca_worktree_id": "repo::/tmp/issue-2",
+                "worktree_path": "/tmp/issue-2", "branch": "issue-2-attempt-1",
+                name: identities[name],
+            }
+            with self.subTest(name=name), self.assertRaisesRegex(
+                WATCHER.OrcaIdentityError, name
+            ):
+                ledger.assign_orca(second["node_id"], second["attempt_number"], **candidate)
+
+        history = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("dispatch-1", history["orca_dispatch_id"])
+        self.assertEqual("/tmp/issue-1", history["worktree_path"])
+
+    def test_dispatch_identity_reuse_fails_closed_without_copying_identity(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        ledger.enqueue(self.issue("I_kwDO-old", 9))
+        old = ledger.claim_next()
+        ledger.assign_orca(
+            old["node_id"], old["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-old", orca_dispatch_id="dispatch-old",
+            orca_worktree_id="repo::/tmp/shared", worktree_path="/tmp/shared",
+            branch="issue-9-attempt-1",
+        )
+        ledger.finish(old["node_id"], old["attempt_number"], "needs-human", summary="stopped")
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[eligible]
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-new"
+        ), mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"dispatch": {"id": "dispatch-new"}, "worktree": {
+                "id": "repo::/tmp/shared", "path": "/tmp/shared",
+                "branch": "refs/heads/issue-1-attempt-1"
+            }}},
+            {"ok": True, "result": {}},
+        ]) as orca_call, mock.patch.object(WATCHER, "create_blocked_worktree") as blocked:
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+
+        self.assertEqual("needs-human", result["status"])
+        self.assertIn("reused recorded orca_worktree_id", result["summary"])
+        self.assertFalse(blocked.called)
+        self.assertEqual("worker-stop", orca_call.call_args_list[1].args[2])
+        self.assertNotIn("worktree", [call.args[1] for call in orca_call.call_args_list[1:]])
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("task-new", attempt["orca_task_id"])
+        self.assertEqual("dispatch-new", attempt["orca_dispatch_id"])
+        self.assertIsNone(attempt["orca_worktree_id"])
+
+    def test_failed_worker_fence_preserves_ids_and_blocks_retry_while_running(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        ledger.enqueue(self.issue("I_kwDO-old", 9))
+        old = ledger.claim_next()
+        ledger.assign_orca(
+            old["node_id"], old["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-old", orca_dispatch_id="dispatch-old",
+            orca_worktree_id="repo::/tmp/shared", worktree_path="/tmp/shared",
+            branch="issue-9-attempt-1",
+        )
+        ledger.finish(old["node_id"], old["attempt_number"], "needs-human", summary="stopped")
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[eligible]
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-new"
+        ), mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"dispatch": {"id": "dispatch-new"}, "worktree": {
+                "id": "repo::/tmp/shared", "path": "/tmp/shared",
+                "branch": "refs/heads/issue-1-attempt-1"
+            }}},
+            WATCHER.WatcherError("stop failed"),
+        ]):
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+
+        self.assertEqual("needs-human", result["status"])
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("task-new", attempt["orca_task_id"])
+        self.assertEqual("dispatch-new", attempt["orca_dispatch_id"])
+        with mock.patch.object(
+            WATCHER, "json_command", return_value={"status": "running"}
+        ), self.assertRaisesRegex(WATCHER.WatcherError, "still running"):
+            ledger.retry(issue["url"], self.repo, False, orca_cli="orca")
+
+    def test_nonstalled_orca_error_cannot_record_duplicate_residual_worktree(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        ledger.enqueue(self.issue("I_kwDO-old", 9))
+        old = ledger.claim_next()
+        ledger.assign_orca(
+            old["node_id"], old["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-old", orca_dispatch_id="dispatch-old",
+            orca_worktree_id="repo::/tmp/shared", worktree_path="/tmp/shared",
+            branch="issue-9-attempt-1",
+        )
+        ledger.finish(old["node_id"], old["attempt_number"], "needs-human", summary="stopped")
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        residual = {"result": {"dispatchId": "dispatch-new", "worktree": {
+            "id": "repo::/tmp/shared", "path": "/tmp/shared",
+            "branch": "refs/heads/issue-1-attempt-1"
+        }}}
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[eligible]
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-new"
+        ), mock.patch.object(
+            WATCHER, "orca_call", side_effect=WATCHER.OrcaCommandError("Orca failed", residual)
+        ), mock.patch.object(WATCHER, "create_blocked_worktree") as blocked:
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+
+        self.assertEqual("needs-human", result["status"])
+        self.assertFalse(blocked.called)
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("task-new", attempt["orca_task_id"])
+        self.assertEqual("dispatch-new", attempt["orca_dispatch_id"])
+        self.assertIsNone(attempt["orca_worktree_id"])
+
+    def test_reused_task_id_stops_before_worker_start(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        ledger.enqueue(self.issue("I_kwDO-old", 9))
+        old = ledger.claim_next()
+        ledger.assign_orca(
+            old["node_id"], old["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-reused", orca_dispatch_id="dispatch-old",
+            orca_worktree_id="repo::/tmp/old", worktree_path="/tmp/old",
+            branch="issue-9-attempt-1",
+        )
+        ledger.finish(old["node_id"], old["attempt_number"], "needs-human", summary="stopped")
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[eligible]
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-reused"
+        ), mock.patch.object(WATCHER, "orca_call") as orca_call:
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+
+        self.assertEqual("needs-human", result["status"])
+        self.assertIn("reused recorded orca_task_id", result["summary"])
+        orca_call.assert_not_called()
+
+    def test_incomplete_worker_receipt_stops_without_fallback_worktree(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[eligible]
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-new"
+        ), mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"dispatch": {"id": "dispatch-new"}}},
+            {"ok": True, "result": {}},
+        ]) as orca_call, mock.patch.object(WATCHER, "create_blocked_worktree") as blocked:
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+
+        self.assertEqual("needs-human", result["status"])
+        self.assertIn("omitted its worktree identity", result["summary"])
+        self.assertFalse(blocked.called)
+        self.assertEqual("worker-stop", orca_call.call_args_list[1].args[2])
+
+    def test_same_attempt_cannot_replace_recorded_orca_identity(self) -> None:
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        identities = {
+            "run_id": str(uuid.uuid4()), "agent_id": "codex", "orca_task_id": "task-1",
+            "orca_dispatch_id": "dispatch-1", "orca_worktree_id": "repo::/tmp/issue-1",
+            "worktree_path": "/tmp/issue-1", "branch": "issue-1-attempt-1",
+        }
+        ledger.assign_orca(claimed["node_id"], claimed["attempt_number"], **identities)
+        with self.assertRaisesRegex(WATCHER.OrcaIdentityError, "replace recorded orca_dispatch_id"):
+            ledger.assign_orca(
+                claimed["node_id"], claimed["attempt_number"],
+                **{**identities, "orca_dispatch_id": "dispatch-replacement"},
+            )
 
     def test_prompt_requires_literal_receipt_prefix_with_one_line_example(self) -> None:
         prompt = WATCHER.prompt_for({
@@ -487,14 +697,33 @@ class IssueWatcherTests(unittest.TestCase):
             stdout=subprocess.PIPE,
         ).stdout.strip()
         evidence = self.repair_evidence(worktree, branch, sha, sha)
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=evidence["run_id"], agent_id="codex",
+            orca_task_id="task-1", orca_dispatch_id="dispatch-1",
+            orca_worktree_id=f"repo::{worktree}", worktree_path=str(worktree), branch=branch,
+        )
         ledger.finish(claimed["node_id"], claimed["attempt_number"], "ready-for-review",
                       summary="review me", **evidence)
         self.assertEqual(2, ledger.retry(self.issue()["url"], self.repo, True))
         self.assertFalse(worktree.exists())
         retried = ledger.claim_next()
         self.assertEqual(2, retried["attempt_number"])
+        with self.assertRaisesRegex(WATCHER.OrcaIdentityError, "orca_worktree_id"):
+            ledger.assign_orca(
+                retried["node_id"], retried["attempt_number"], run_id=str(uuid.uuid4()),
+                agent_id="codex", orca_task_id="task-2", orca_dispatch_id="dispatch-2",
+                orca_worktree_id=f"repo::{worktree}", worktree_path=str(self.root / "attempt-2"),
+                branch="issue-1-attempt-2",
+            )
+        ledger.assign_orca(
+            retried["node_id"], retried["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-2", orca_dispatch_id="dispatch-2",
+            orca_worktree_id=f"repo::{self.root / 'attempt-2'}",
+            worktree_path=str(self.root / "attempt-2"), branch="issue-1-attempt-2",
+        )
         history = ledger.snapshot()["issues"][0]["attempt_history"]
         self.assertEqual("rejected", history[0]["status"])
+        self.assertNotEqual(history[0]["orca_worktree_id"], history[1]["orca_worktree_id"])
 
     def test_discard_refuses_receipt_branch_that_does_not_match_worktree(self) -> None:
         ledger = self.ledger()

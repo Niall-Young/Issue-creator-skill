@@ -30,6 +30,14 @@ class WatcherError(RuntimeError):
     pass
 
 
+class OrcaIdentityError(WatcherError):
+    pass
+
+
+class OrcaEvidenceError(WatcherError):
+    pass
+
+
 class OrcaCommandError(WatcherError):
     def __init__(self, message: str, response: dict[str, Any]) -> None:
         super().__init__(message)
@@ -317,7 +325,28 @@ class Ledger:
         }, "artifacts_assigned")
 
     def assign_orca(self, node_id: str, attempt: int, **fields: Any) -> None:
-        self._update(node_id, attempt, "running", fields, "orca_dispatched")
+        required = ("orca_task_id", "orca_dispatch_id", "orca_worktree_id", "worktree_path")
+        if any(not isinstance(fields.get(name), str) or not fields[name] for name in required):
+            raise OrcaIdentityError("Orca dispatch evidence is incomplete")
+        worktree = Path(fields["worktree_path"])
+        if not worktree.is_absolute():
+            raise OrcaIdentityError("Orca worktree path must be absolute")
+        self._update(node_id, attempt, "running", fields, "orca_dispatched", validate_orca=True)
+
+    def ensure_orca_identity_available(self, node_id: str, attempt: int, name: str, value: str) -> None:
+        if name not in {"orca_task_id", "orca_dispatch_id", "orca_worktree_id", "worktree_path"}:
+            raise WatcherError("unsupported Orca identity field")
+        if not isinstance(value, str) or not value:
+            raise OrcaIdentityError(f"Orca {name} is missing")
+        if name == "worktree_path" and not Path(value).is_absolute():
+            raise OrcaIdentityError("Orca worktree path must be absolute")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._ensure_orca_identity_available(node_id, attempt, name, value)
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def active_attempts(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute(
@@ -326,15 +355,17 @@ class Ledger:
                WHERE attempts.status='running' ORDER BY issues.created_at, issues.issue_number"""
         )]
 
-    def finish(self, node_id: str, attempt: int, status: str, **fields: Any) -> None:
+    def finish(self, node_id: str, attempt: int, status: str,
+               validate_orca: bool = False, **fields: Any) -> None:
         if status == "succeeded":
             status = "ready-for-review"
         if status not in STOPPED_STATES:
             raise WatcherError(f"invalid result status: {status}")
         fields["pid"] = None
-        self._update(node_id, attempt, status, fields, "finished")
+        self._update(node_id, attempt, status, fields, "finished", validate_orca=validate_orca)
 
-    def _update(self, node_id: str, attempt: int, status: str, fields: dict[str, Any], kind: str) -> None:
+    def _update(self, node_id: str, attempt: int, status: str, fields: dict[str, Any], kind: str,
+                validate_orca: bool = False) -> None:
         allowed = {"pid", "run_id", "worktree_path", "branch", "base_sha", "head_sha",
                    "summary", "returncode", "log_path", "agent_id", "orca_task_id",
                    "orca_dispatch_id", "orca_worktree_id"}
@@ -342,6 +373,10 @@ class Ledger:
             raise WatcherError("unsupported attempt field")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            if validate_orca:
+                for name in ("orca_task_id", "orca_dispatch_id", "orca_worktree_id", "worktree_path"):
+                    if name in fields:
+                        self._ensure_orca_identity_available(node_id, attempt, name, fields[name])
             assignments = ["status=?", *[f"{key}=?" for key in fields]]
             cursor = self.connection.execute(
                 f"UPDATE attempts SET {', '.join(assignments)} WHERE node_id=? AND attempt_number=?",
@@ -361,6 +396,32 @@ class Ledger:
         except Exception:
             self.connection.execute("ROLLBACK")
             raise
+
+    def _ensure_orca_identity_available(self, node_id: str, attempt: int,
+                                        name: str, value: str) -> None:
+        current = self.connection.execute(
+            f"SELECT {name} FROM attempts WHERE node_id=? AND attempt_number=?",
+            (node_id, attempt),
+        ).fetchone()
+        if current is None:
+            raise WatcherError("attempt not found")
+        recorded = current[name]
+        normalized = str(Path(value).resolve()) if name == "worktree_path" else value
+        if recorded is not None:
+            recorded_normalized = (str(Path(recorded).resolve())
+                                   if name == "worktree_path" else recorded)
+            if recorded_normalized != normalized:
+                raise OrcaIdentityError(f"Orca attempted to replace recorded {name}")
+        candidates = self.connection.execute(
+            f"""SELECT node_id, attempt_number, {name} FROM attempts
+                WHERE {name} IS NOT NULL AND NOT (node_id=? AND attempt_number=?)""",
+            (node_id, attempt),
+        ).fetchall()
+        conflict = next((row for row in candidates if (
+            str(Path(row[name]).resolve()) if name == "worktree_path" else row[name]
+        ) == normalized), None)
+        if conflict:
+            raise OrcaIdentityError(f"Orca reused recorded {name} from another Issue or attempt")
 
     def retry(self, url: str, repo: Path, discard: bool, orca_cli: str | None = None) -> int:
         issue = self.connection.execute("SELECT * FROM issues WHERE url=?", (url,)).fetchone()
@@ -949,7 +1010,11 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
             ledger.finish(run["node_id"], attempt, "blocked", summary="Issue is no longer open or eligible",
                           run_id=repair_run_id)
             return {"url": run["url"], "status": "blocked"}
-        task_id = create_orca_task(config, run_id, run)
+        candidate_task_id = create_orca_task(config, run_id, run)
+        ledger.ensure_orca_identity_available(
+            run["node_id"], attempt, "orca_task_id", candidate_task_id
+        )
+        task_id = candidate_task_id
         agent = select_agent(issue, config)
         response = orca_call(
             config, "orchestration", "worker-start", "--run", run_id, "--task", task_id,
@@ -963,21 +1028,25 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
                                    ("result", "dispatchId"), ("result", "worker", "dispatchId"))
         worktree = nested_value(response, ("result", "worktree"), ("result", "worker", "worktree"),
                                 ("result", "placement", "worktree"))
-        if not isinstance(dispatch_id, str) or not dispatch_id or not isinstance(worktree, dict):
-            raise WatcherError("Orca worker receipt omitted its Dispatch or worktree identity")
+        if not isinstance(dispatch_id, str) or not dispatch_id:
+            raise OrcaEvidenceError("Orca worker receipt omitted its Dispatch identity")
+        ledger.ensure_orca_identity_available(run["node_id"], attempt, "orca_dispatch_id", dispatch_id)
+        dispatch_identity_verified = True
+        if not isinstance(worktree, dict):
+            raise OrcaEvidenceError("Orca worker receipt omitted its worktree identity")
         worktree_id = worktree.get("id") or worktree.get("worktreeId")
         worktree_path = worktree.get("path") or worktree.get("worktreePath")
         branch = str(worktree.get("branch", "")).removeprefix("refs/heads/")
         if not all(isinstance(value, str) and value for value in (worktree_id, worktree_path, branch)):
-            raise WatcherError("Orca worker receipt omitted worktree path or branch")
-        orca_call(config, "worktree", "set", "--worktree", f"id:{worktree_id}",
-                  "--issue", str(run["issue_number"]), "--workspace-status", "in-progress",
-                  "--comment", f"{agent}: investigating")
+            raise OrcaEvidenceError("Orca worker receipt omitted worktree path or branch")
         ledger.assign_orca(
             run["node_id"], attempt, run_id=repair_run_id, agent_id=agent,
             orca_task_id=task_id, orca_dispatch_id=dispatch_id, orca_worktree_id=worktree_id,
             worktree_path=worktree_path, branch=branch,
         )
+        orca_call(config, "worktree", "set", "--worktree", f"id:{worktree_id}",
+                  "--issue", str(run["issue_number"]), "--workspace-status", "in-progress",
+                  "--comment", f"{agent}: investigating")
         return {"url": run["url"], "attempt": attempt, "status": "running", "agent": agent,
                 "orca_task_id": task_id, "orca_dispatch_id": dispatch_id,
                 "orca_worktree_id": worktree_id}
@@ -989,6 +1058,19 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
         stalled = (find_named_string(exc.response, {"lastError", "last_error"})
                    if isinstance(exc, OrcaCommandError) else None) == "agent_prompt_stalled"
         blocked = find_worktree(exc.response) if isinstance(exc, OrcaCommandError) else {}
+        worker_started = "response" in locals()
+        if worker_started:
+            local_worktree = locals().get("worktree")
+            if isinstance(local_worktree, dict):
+                blocked = local_worktree
+            local_dispatch = locals().get("dispatch_id")
+            if isinstance(local_dispatch, str) and local_dispatch:
+                residual_dispatch = local_dispatch
+        if worker_started and locals().get("dispatch_identity_verified") is True:
+            try:
+                orca_call(config, "orchestration", "worker-stop", "--dispatch", residual_dispatch)
+            except WatcherError as stop_error:
+                summary = f"{summary}; failed to fence the new Orca worker: {stop_error}"
         if not blocked and isinstance(exc, OrcaCommandError):
             residual_worktree_id = find_worktree_id(exc.response)
             if residual_worktree_id:
@@ -1002,16 +1084,37 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
             branch = str(blocked.get("branch", "")).removeprefix("refs/heads/")
             if all(isinstance(value, str) and value
                    for value in (worktree_id, worktree_path, branch)):
-                ledger.assign_orca(
-                    run["node_id"], attempt, run_id=repair_run_id, agent_id=agent,
-                    orca_task_id=task_id, orca_dispatch_id=residual_dispatch,
-                    orca_worktree_id=worktree_id, worktree_path=worktree_path, branch=branch,
-                )
+                try:
+                    ledger.ensure_orca_identity_available(
+                        run["node_id"], attempt, "orca_dispatch_id", residual_dispatch
+                    )
+                    stalled_dispatch_verified = True
+                    ledger.assign_orca(
+                        run["node_id"], attempt, run_id=repair_run_id, agent_id=agent,
+                        orca_task_id=task_id, orca_dispatch_id=residual_dispatch,
+                        orca_worktree_id=worktree_id, worktree_path=worktree_path, branch=branch,
+                    )
+                except OrcaIdentityError as identity_error:
+                    summary = str(identity_error)
+                    if locals().get("stalled_dispatch_verified") is True:
+                        try:
+                            orca_call(config, "orchestration", "worker-stop",
+                                      "--dispatch", residual_dispatch)
+                        except WatcherError as stop_error:
+                            summary = f"{summary}; failed to fence the new Orca worker: {stop_error}"
+                    failure_fields = {"summary": summary, "run_id": repair_run_id,
+                                      "orca_task_id": task_id}
+                    if locals().get("stalled_dispatch_verified") is True:
+                        failure_fields["orca_dispatch_id"] = residual_dispatch
+                    ledger.finish(run["node_id"], attempt, "needs-human",
+                                  validate_orca=True, **failure_fields)
+                    return {"url": run["url"], "attempt": attempt,
+                            "status": "needs-human", "summary": summary}
                 return {"url": run["url"], "attempt": attempt, "status": "running",
                         "agent": agent, "orca_task_id": task_id,
                         "orca_dispatch_id": residual_dispatch, "orca_worktree_id": worktree_id,
                         "warning": "Orca readiness timed out after the Agent received its prompt"}
-        if not blocked:
+        if not blocked and not worker_started and not isinstance(exc, OrcaIdentityError):
             try:
                 blocked = create_blocked_worktree(config, repository, run, summary)
             except WatcherError:
@@ -1020,13 +1123,36 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
         fields = {"summary": summary, "run_id": repair_run_id}
         if isinstance(task_id, str):
             fields["orca_task_id"] = task_id
-        if residual_dispatch:
+        dispatch_safe = locals().get("dispatch_identity_verified") is True
+        if residual_dispatch and not dispatch_safe:
+            try:
+                ledger.ensure_orca_identity_available(
+                    run["node_id"], attempt, "orca_dispatch_id", residual_dispatch
+                )
+                dispatch_safe = True
+            except OrcaIdentityError as identity_error:
+                summary = str(identity_error)
+                fields["summary"] = summary
+                blocked = {}
+                worktree_id = None
+        if residual_dispatch and dispatch_safe:
             fields["orca_dispatch_id"] = residual_dispatch
         if isinstance(worktree_id, str):
-            fields["orca_worktree_id"] = worktree_id
-            fields["worktree_path"] = blocked.get("path") or blocked.get("worktreePath")
-            fields["branch"] = str(blocked.get("branch", "")).removeprefix("refs/heads/")
-        ledger.finish(run["node_id"], attempt, "needs-human", **fields)
+            worktree_path = blocked.get("path") or blocked.get("worktreePath")
+            try:
+                ledger.ensure_orca_identity_available(
+                    run["node_id"], attempt, "orca_worktree_id", worktree_id
+                )
+                ledger.ensure_orca_identity_available(
+                    run["node_id"], attempt, "worktree_path", worktree_path
+                )
+                fields["orca_worktree_id"] = worktree_id
+                fields["worktree_path"] = worktree_path
+                fields["branch"] = str(blocked.get("branch", "")).removeprefix("refs/heads/")
+            except OrcaIdentityError as identity_error:
+                summary = str(identity_error)
+                fields["summary"] = summary
+        ledger.finish(run["node_id"], attempt, "needs-human", validate_orca=True, **fields)
         return {"url": run["url"], "attempt": attempt, "status": "needs-human", "summary": summary,
                 "orca_worktree_id": worktree_id}
 

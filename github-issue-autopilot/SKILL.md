@@ -26,6 +26,7 @@ Read [references/configuration.md](references/configuration.md) when creating or
 - Keep `publication` set to `never`. Setup may create the one configured repository label; repair runs never push, create PRs, merge, close, comment, relabel Issues, release, deploy, run migrations, or perform destructive operations.
 - Pass only fixed argument arrays to the Orca CLI. Never interpolate Issue text into shell syntax; Issue titles belong in typed Orca metadata and Task specs.
 - Use Orca as the worktree and worker source of truth. Never fall back to hidden `git worktree` or background Agent CLI execution when Orca is unavailable.
+- Preserve one immutable chain per Issue attempt: a fresh Orca Task, Dispatch, worktree ID, and absolute path may belong to exactly one Issue and attempt. Reject any reused identity; never substitute a standalone repair, shared worktree, manual merge, or ledger backfill for `retry` or `accept`.
 - Enqueue every eligible Issue and run at most three supervised Orca workers concurrently. Each worker is a visible child worktree under the configured project.
 - Choose the single `agent:ID` Issue label when present; otherwise use the repository default. Conflicting, disallowed, or unavailable agents stop visibly at `needs-human` and never silently fall back.
 
@@ -42,6 +43,8 @@ python3 scripts/autopilot_admin.py stop --repo-path /absolute/repository/root
 ```
 
 `status` reports queued Issues and every attempt with its selected agent, Orca Task/Dispatch/worktree IDs, branch, SHA, and terminal state. Never infer unfinished work from the Issue remaining open. At most three attempts may be `running`; `ready-for-review`, `needs-human`, `blocked`, and `failed` never relaunch automatically. Only an explicit retry may create the next attempt. `--discard-worktree` is destructive authorization for exactly the recorded Orca worktree and branch; refuse other paths or live Dispatches.
+
+For an Issue already in the ledger, an abandoned or unsatisfactory result must remain immutable history and continue only through `retry`. The coordinator must then create a new Orca child worktree for that Issue; Orca unavailability, incomplete evidence, or reuse of any historical or cross-Issue identity stops at `needs-human` without a manual fallback.
 
 `doctor` is read-only and reports both watcher health and the repository-specific LaunchAgent's plist consistency and `launchctl` load state. Treat `ok: false` as unhealthy even when the watcher-level dependencies pass.
 
