@@ -192,6 +192,51 @@ class IssueWatcherTests(unittest.TestCase):
         with self.assertRaisesRegex(WATCHER.WatcherError, "activate_after"):
             WATCHER.load_config(path)
 
+    def doctor_with_executor(self, executable: str) -> dict:
+        config = self.config()
+        config["executor"]["argv"][0] = executable
+        config["repositories"][0]["repo_path"] = self.repo.resolve()
+        healthy = subprocess.CompletedProcess([], 0, str(self.repo.resolve()), "")
+        with mock.patch.object(WATCHER.shutil, "which", return_value="/usr/bin/gh"), mock.patch.object(
+            WATCHER, "command", return_value=healthy
+        ), mock.patch.object(WATCHER, "repository_metadata"):
+            return WATCHER.doctor(config)
+
+    def test_doctor_accepts_executable_absolute_executor(self) -> None:
+        executable = self.root / "executor"
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o700)
+        result = self.doctor_with_executor(str(executable))
+        self.assertTrue(result["executor"])
+        self.assertTrue(result["ok"])
+
+    def test_doctor_rejects_non_executable_absolute_executor(self) -> None:
+        executable = self.root / "executor"
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o600)
+        result = self.doctor_with_executor(str(executable))
+        self.assertFalse(result["executor"])
+        self.assertFalse(result["ok"])
+
+    def test_doctor_rejects_missing_absolute_executor(self) -> None:
+        result = self.doctor_with_executor(str(self.root / "missing-executor"))
+        self.assertFalse(result["executor"])
+        self.assertFalse(result["ok"])
+
+    def test_doctor_keeps_path_lookup_for_bare_executor_command(self) -> None:
+        config = self.config()
+        config["executor"]["argv"][0] = "agent-cli"
+        config["repositories"][0]["repo_path"] = self.repo.resolve()
+        healthy = subprocess.CompletedProcess([], 0, str(self.repo.resolve()), "")
+        with mock.patch.object(
+            WATCHER.shutil, "which", side_effect=lambda value: f"/usr/bin/{value}"
+        ) as which, mock.patch.object(WATCHER, "command", return_value=healthy), mock.patch.object(
+            WATCHER, "repository_metadata"
+        ):
+            result = WATCHER.doctor(config)
+        self.assertTrue(result["executor"])
+        which.assert_any_call("agent-cli")
+
     def test_success_receipt_must_resolve_to_registered_repair_worktree(self) -> None:
         worktree = self.root / "repair-worktree"
         subprocess.run(

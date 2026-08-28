@@ -660,7 +660,9 @@ def work_once(config: dict[str, Any], ledger: Ledger) -> dict[str, Any] | None:
 def doctor(config: dict[str, Any]) -> dict[str, Any]:
     executable = config["executor"]["argv"][0]
     result: dict[str, Any] = {"gh": shutil.which("gh") is not None,
-        "executor": shutil.which(executable) is not None if "/" not in executable else Path(executable).is_file(),
+        "executor": shutil.which(executable) is not None if "/" not in executable else (
+            Path(executable).is_file() and os.access(executable, os.X_OK)
+        ),
         "repositories": []}
     result["gh_auth"] = result["gh"] and command(["gh", "auth", "status"]).returncode == 0
     for item in config["repositories"]:
