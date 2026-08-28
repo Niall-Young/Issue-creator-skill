@@ -223,6 +223,36 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("needs-human", result["status"])
         self.assertEqual("needs-human", ledger.snapshot()["issues"][0]["status"])
 
+    def test_prompt_stall_preserves_real_orca_worker_without_duplicate(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        worktree = self.root / "stalled-worker"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", "stalled-worker",
+             str(worktree), "HEAD"], check=True, stdout=subprocess.PIPE,
+        )
+        response = {"result": {"dispatchId": "dispatch-stalled",
+                                "lastError": "agent_prompt_stalled", "effects": [
+            {"kind": "worktree", "id": f"repo::{worktree}"}
+        ]}}
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[eligible]
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-stalled"
+        ), mock.patch.object(
+            WATCHER, "orca_call", side_effect=WATCHER.OrcaCommandError("Orca command failed", response)
+        ), mock.patch.object(WATCHER, "create_blocked_worktree") as blocked:
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+        self.assertEqual("running", result["status"])
+        self.assertFalse(blocked.called)
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("dispatch-stalled", attempt["orca_dispatch_id"])
+        self.assertEqual(str(worktree), attempt["worktree_path"])
+
     def test_completed_orca_worker_requires_verified_receipt(self) -> None:
         config = self.config()
         ledger = self.ledger()

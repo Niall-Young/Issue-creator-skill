@@ -535,6 +535,28 @@ def find_worktree(value: Any) -> dict[str, Any]:
     return {}
 
 
+def find_worktree_id(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("worktreeId", "worktree_id"):
+            identity = value.get(key)
+            if isinstance(identity, str) and "::" in identity:
+                return identity
+        if value.get("kind") == "worktree":
+            identity = value.get("id")
+            if isinstance(identity, str) and "::" in identity:
+                return identity
+        for item in value.values():
+            found = find_worktree_id(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = find_worktree_id(item)
+            if found:
+                return found
+    return None
+
+
 def find_named_string(value: Any, names: set[str]) -> str | None:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -875,7 +897,33 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
     except WatcherError as exc:
         summary = str(exc)
         task_id = locals().get("task_id")
+        residual_dispatch = (find_named_string(exc.response, {"dispatchId", "dispatch_id"})
+                             if isinstance(exc, OrcaCommandError) else None)
+        stalled = (find_named_string(exc.response, {"lastError", "last_error"})
+                   if isinstance(exc, OrcaCommandError) else None) == "agent_prompt_stalled"
         blocked = find_worktree(exc.response) if isinstance(exc, OrcaCommandError) else {}
+        if not blocked and isinstance(exc, OrcaCommandError):
+            residual_worktree_id = find_worktree_id(exc.response)
+            if residual_worktree_id:
+                residual_path = Path(residual_worktree_id.split("::", 1)[1])
+                if residual_path.is_dir():
+                    blocked = {"id": residual_worktree_id, "path": str(residual_path),
+                               "branch": git(residual_path, "branch", "--show-current")}
+        if stalled and residual_dispatch and blocked and isinstance(task_id, str):
+            worktree_id = blocked.get("id") or blocked.get("worktreeId")
+            worktree_path = blocked.get("path") or blocked.get("worktreePath")
+            branch = str(blocked.get("branch", "")).removeprefix("refs/heads/")
+            if all(isinstance(value, str) and value
+                   for value in (worktree_id, worktree_path, branch)):
+                ledger.assign_orca(
+                    run["node_id"], attempt, run_id=repair_run_id, agent_id=agent,
+                    orca_task_id=task_id, orca_dispatch_id=residual_dispatch,
+                    orca_worktree_id=worktree_id, worktree_path=worktree_path, branch=branch,
+                )
+                return {"url": run["url"], "attempt": attempt, "status": "running",
+                        "agent": agent, "orca_task_id": task_id,
+                        "orca_dispatch_id": residual_dispatch, "orca_worktree_id": worktree_id,
+                        "warning": "Orca readiness timed out after the Agent received its prompt"}
         if not blocked:
             try:
                 blocked = create_blocked_worktree(config, repository, run, summary)
@@ -885,10 +933,8 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
         fields = {"summary": summary, "run_id": repair_run_id}
         if isinstance(task_id, str):
             fields["orca_task_id"] = task_id
-        if isinstance(exc, OrcaCommandError):
-            residual_dispatch = find_named_string(exc.response, {"dispatchId", "dispatch_id"})
-            if residual_dispatch:
-                fields["orca_dispatch_id"] = residual_dispatch
+        if residual_dispatch:
+            fields["orca_dispatch_id"] = residual_dispatch
         if isinstance(worktree_id, str):
             fields["orca_worktree_id"] = worktree_id
             fields["worktree_path"] = blocked.get("path") or blocked.get("worktreePath")
@@ -920,11 +966,24 @@ def reconcile_workers(config: dict[str, Any], ledger: Ledger) -> list[dict[str, 
         state = worker_state(show)
         if state == "running":
             continue
+        receipt = None
+        if (state == "failed" and
+                find_named_string(show, {"lastError", "last_error"}) == "agent_prompt_stalled"):
+            try:
+                output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
+                                   "--source", "auto", "--limit", "200")
+                receipt = parse_receipt(string_content(output))
+            except WatcherError:
+                continue
+            if receipt is None:
+                continue
+            state = "completed"
         status, summary, evidence = "failed", "Orca worker failed or stopped", {}
         if state == "completed":
-            output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
-                               "--source", "auto", "--limit", "200")
-            receipt = parse_receipt(string_content(output))
+            if receipt is None:
+                output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
+                                   "--source", "auto", "--limit", "200")
+                receipt = parse_receipt(string_content(output))
             repository = next(item for item in config["repositories"]
                               if item["repository"] == attempt["repository"])
             status, summary, evidence = verified_receipt(receipt, repository, attempt)
