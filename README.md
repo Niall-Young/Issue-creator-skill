@@ -89,7 +89,7 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 在任意 GitHub 项目中说“构建 Issue 循环检查机制”，Autopilot 会运行确定性安装器，创建缺失的 `agent-ready` 标签、仓库独立配置、Orca 原生 Automation 与 Orca 协调器。Automation 可在 GUI 中暂停、恢复和查看历史；它每三分钟预检一次，只有协调器缺失时才调用 Agent 恢复，不会每轮消耗模型。全部合格 Issue 都会入账，最多三个在 Orca 左侧作为项目子 worktree 同时运行。未完成的 `failed` attempt 若对应 Issue 仍 open 且符合策略，会在下一轮自动重试，默认总计最多两次；待验收、明确需人工或策略阻塞的结果不会自动重做。每个 Issue 的每次 attempt 必须使用从未被历史 attempt 或其他 Issue 使用过的 Orca Task、Dispatch、worktree ID 和绝对路径；身份复用或成功证据不完整会停止等待人工处理，不会退回手工或共享 worktree。安装时用 `--agent` 选择默认 Agent；单个 Issue 可用唯一 `agent:ID` 标签覆盖，冲突、禁用或不可用的 Agent 会停在可见的人工处理状态。满意时明确 `accept` 到当前干净的目标分支；它会在合并成功后关闭并回读对应 Issue，关闭失败则保留 worktree 供安全重试。若 worktree 已被手工清理，只有记录的修复 head 已在目标分支历史中时才能补关。不满意时通过明确的 `retry` 保留旧 attempt 历史并创建全新 Orca 子 worktree；人工重试可超过自动次数上限。旧 worktree 仍存在且决定舍弃时使用 `retry --discard-worktree` 精确清理。standalone repair、手工 `git worktree`、共享 worktree、手工合并或补写账本都不能替代该流程。详见 [`configuration.md`](github-issue-autopilot/references/configuration.md)。
 
-首次安装第四个 Skill 后，直接说“更新 issue-workflow”即可更新当前 Agent 运行时。更新器只接受 `Niall-Young/github-issue-workflow` 的最新稳定 Release，拒绝 draft、prerelease、降级、校验失败和异常归档。它会覆盖四个受管 Skill（包括手工修改），并同步所有已安装的 Autopilot runtime；任一步失败都会恢复整套 Skill、runtime 与 Automation 状态。它不会执行 `git pull`、修改源码 checkout、更新其他 Skill 或扫描其他 Agent 运行时。仓库中的首个发行版本声明为 `v1.0.0`；必须在获得远程发布授权后推送同名 tag，更新器才会取得首个稳定包。
+首次安装第四个 Skill 后，直接说“更新 issue-workflow”即可更新当前 Agent 运行时。更新器只接受 `Niall-Young/github-issue-workflow` 的最新稳定 Release，拒绝 draft、prerelease、降级、校验失败和异常归档。它会覆盖四个受管 Skill（包括手工修改），并同步所有已安装的 Autopilot runtime；任一步失败都会恢复整套 Skill、runtime 与 Automation 状态。它不会执行 `git pull`、修改源码 checkout、更新其他 Skill 或扫描其他 Agent 运行时。仓库中的首个发行版本声明为 `v0.1.0`；必须在获得远程发布授权后推送同名 tag，更新器才会取得首个稳定包。
 
 ### 配置
 
@@ -149,7 +149,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
-python3 scripts/build_release.py --tag v1.0.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
+python3 scripts/build_release.py --tag v0.1.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
 ```
 
 真实 GitHub 操作还需通过 CLI 端到端回读：
@@ -249,7 +249,7 @@ Expected result: the skill first performs read-only analysis and presents the pa
 
 In any GitHub checkout, ask the Agent to “build an Issue loop.” Autopilot creates the missing `agent-ready` label, repository-isolated configuration, a native Orca Automation, and an Orca coordinator. The Automation can be paused, resumed, and inspected in the GUI. It prechecks every three minutes and invokes an Agent only when the coordinator needs recovery, so healthy checks consume no model turn. Every eligible Issue is recorded, and up to three run concurrently as visible child worktrees in the Orca sidebar. An unfinished `failed` attempt whose Issue remains open and eligible is retried on the next cycle, with two total automatic attempts by default; review-ready, explicit human-action, and policy-blocked results do not relaunch automatically. Each Issue attempt must use Orca Task, Dispatch, worktree ID, and absolute-path identities that no historical attempt or other Issue has used; reused identity or incomplete success evidence stops for human action without a manual or shared-worktree fallback. `--agent` selects the repository default; one `agent:ID` Issue label may override it, while conflicting, disallowed, or unavailable choices stop visibly for human action. Explicitly `accept` a satisfactory branch into a named clean target branch; after a successful merge, the command closes and reads back the matching Issue, preserving the worktree for a safe retry if closure fails. If the worktree was manually removed, closure proceeds only when the recorded repair head is already in the target branch history. An unsatisfactory attempt continues through explicit `retry`, which preserves the old attempt as history, may exceed the automatic limit, and creates a fresh Orca child worktree. When an old worktree still exists and is being discarded, `retry --discard-worktree` removes that exact recorded worktree. Standalone repair, manual `git worktree`, shared worktrees, manual merges, and ledger backfills are not substitutes. See [`configuration.md`](github-issue-autopilot/references/configuration.md).
 
-After the fourth Skill has been installed once, say “update issue-workflow” to update the current Agent runtime. The updater accepts only the latest stable Release from `Niall-Young/github-issue-workflow` and rejects drafts, prereleases, downgrades, checksum failures, and malformed archives. It overwrites the four managed Skills, including local edits, and refreshes every installed Autopilot runtime. Any failure restores the complete Skill, runtime, and Automation state. It never runs `git pull`, modifies a source checkout, updates another Skill, or scans another Agent runtime. The repository declares `v1.0.0` as its first release version; the matching tag must be pushed with explicit publication authorization before the updater can retrieve its first stable bundle.
+After the fourth Skill has been installed once, say “update issue-workflow” to update the current Agent runtime. The updater accepts only the latest stable Release from `Niall-Young/github-issue-workflow` and rejects drafts, prereleases, downgrades, checksum failures, and malformed archives. It overwrites the four managed Skills, including local edits, and refreshes every installed Autopilot runtime. Any failure restores the complete Skill, runtime, and Automation state. It never runs `git pull`, modifies a source checkout, updates another Skill, or scans another Agent runtime. The repository declares `v0.1.0` as its first release version; the matching tag must be pushed with explicit publication authorization before the updater can retrieve its first stable bundle.
 
 ### Configuration
 
@@ -309,7 +309,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
-python3 scripts/build_release.py --tag v1.0.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
+python3 scripts/build_release.py --tag v0.1.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
 ```
 
 Real GitHub mutations still require CLI readback:
