@@ -21,7 +21,7 @@ from typing import Any
 CONFIG_VERSION = 2
 LEDGER_VERSION = 3
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-RECEIPT = re.compile(r"AUTOPILOT_RESULT:\s*(\{[^\r\n]+\})")
+RECEIPT = re.compile(r"(?m)^AUTOPILOT_RESULT: (\{[^\r\n]+\})[ \t]*$")
 CHILD_STATES = {"succeeded", "ready-for-review", "needs-human", "blocked", "failed"}
 STOPPED_STATES = {"ready-for-review", "needs-human", "blocked", "failed"}
 
@@ -811,18 +811,38 @@ def poll(config: dict[str, Any], ledger: Ledger) -> dict[str, Any]:
 
 def parse_receipt(output: str) -> dict[str, Any] | None:
     matches = RECEIPT.findall(output)
-    if not matches:
-        return None
-    try:
-        value = json.loads(matches[-1])
-    except json.JSONDecodeError:
-        return None
-    return value if value.get("status") in CHILD_STATES and isinstance(value.get("summary"), str) else None
+    for payload in reversed(matches):
+        try:
+            value = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(value, dict) and value.get("status") in CHILD_STATES
+                and isinstance(value.get("summary"), str)):
+            return value
+    return None
 
 
-def verified_receipt(receipt: dict[str, Any] | None, repository: dict[str, Any], run: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+def invalid_receipt_summary(output: str) -> str:
+    candidates = [line for line in output.splitlines() if "AUTOPILOT_RESULT" in line]
+    if not candidates:
+        return "Orca worker returned no valid AUTOPILOT_RESULT receipt"
+    line = candidates[-1]
+    if line.startswith("AUTOPILOT_RESULT "):
+        return "invalid AUTOPILOT_RESULT receipt: missing required colon after the prefix"
+    if line.startswith("AUTOPILOT_RESULT:"):
+        if not line.startswith("AUTOPILOT_RESULT: "):
+            return "invalid AUTOPILOT_RESULT receipt: expected the literal prefix `AUTOPILOT_RESULT: `"
+        try:
+            json.loads(line.removeprefix("AUTOPILOT_RESULT: "))
+        except json.JSONDecodeError:
+            return "invalid AUTOPILOT_RESULT receipt: payload is invalid JSON"
+    return "invalid AUTOPILOT_RESULT receipt: expected one exact standalone receipt line"
+
+
+def verified_receipt(receipt: dict[str, Any] | None, repository: dict[str, Any],
+                     run: dict[str, Any], output: str = "") -> tuple[str, str, dict[str, Any]]:
     if receipt is None:
-        return "needs-human", "Orca worker returned no valid AUTOPILOT_RESULT receipt", {}
+        return "needs-human", invalid_receipt_summary(output), {}
     status = "ready-for-review" if receipt["status"] in {"succeeded", "ready-for-review"} else receipt["status"]
     identity = {key: receipt.get(key) for key in ("run_id", "worktree_path", "branch")}
     expected = {key: run.get(key) for key in identity}
@@ -849,8 +869,12 @@ def prompt_for(run: dict[str, Any], config: dict[str, Any]) -> str:
         "Update the active Orca worktree comment at investigation, implementation, and test checkpoints. "
         "Stop on ambiguity, unsafe work, expansion, dependency upgrades, migrations, security/auth/payment changes, "
         "public API changes, destructive operations, or a broad diff. Never push, create a PR, merge, close, comment, "
-        "label, release, or deploy. Commit only the isolated task changes. Finish with one AUTOPILOT_RESULT JSON line "
-        "and then send the Orca worker_done required by the injected dispatch. Success uses ready-for-review and includes "
+        "label, release, or deploy. Commit only the isolated task changes. Finish with exactly one single-line receipt "
+        "using the literal prefix `AUTOPILOT_RESULT: `. Example (replace the placeholders):\n"
+        "AUTOPILOT_RESULT: "
+        '{"status":"needs-human","summary":"explain why","run_id":"<assigned run ID>",'
+        '"worktree_path":"<absolute worktree path>","branch":"<assigned branch>"}\n'
+        "Then send the Orca worker_done required by the injected dispatch. Success uses ready-for-review and includes "
         "summary, run_id, absolute worktree_path, branch, base_sha, and head_sha. Other statuses are needs-human, "
         "blocked, or failed."
     )
@@ -1029,26 +1053,31 @@ def reconcile_workers(config: dict[str, Any], ledger: Ledger) -> list[dict[str, 
         if state == "running":
             continue
         receipt = None
+        receipt_output = ""
         if (state == "failed" and
                 find_named_string(show, {"lastError", "last_error"}) == "agent_prompt_stalled"):
             try:
                 output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
                                    "--source", "auto", "--limit", "200")
-                receipt = parse_receipt(string_content(output))
+                receipt_output = string_content(output)
+                receipt = parse_receipt(receipt_output)
             except WatcherError:
                 continue
             if receipt is None:
-                continue
+                if not any(line.startswith("AUTOPILOT_RESULT")
+                           for line in receipt_output.splitlines()):
+                    continue
             state = "completed"
         status, summary, evidence = "failed", "Orca worker failed or stopped", {}
         if state == "completed":
-            if receipt is None:
+            if receipt is None and not receipt_output:
                 output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
                                    "--source", "auto", "--limit", "200")
-                receipt = parse_receipt(string_content(output))
+                receipt_output = string_content(output)
+                receipt = parse_receipt(receipt_output)
             repository = next(item for item in config["repositories"]
                               if item["repository"] == attempt["repository"])
-            status, summary, evidence = verified_receipt(receipt, repository, attempt)
+            status, summary, evidence = verified_receipt(receipt, repository, attempt, output=receipt_output)
         ledger.finish(attempt["node_id"], attempt["attempt_number"], status, summary=summary, **evidence)
         if attempt.get("orca_worktree_id"):
             orca_call(config, "worktree", "set", "--worktree", f"id:{attempt['orca_worktree_id']}",
