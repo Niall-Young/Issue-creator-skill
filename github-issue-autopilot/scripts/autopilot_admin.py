@@ -266,6 +266,23 @@ def launchctl_arguments(output: str) -> list[str]:
     return arguments
 
 
+def loaded_launch_agent_matches(output: str, expected: dict[str, Any]) -> bool:
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        stripped = line.strip()
+        if " = " in stripped:
+            key, value = stripped.split(" = ", 1)
+            values[key] = value
+    properties = {item.strip() for item in values.get("properties", "").split("|")}
+    return (
+        launchctl_arguments(output) == expected["ProgramArguments"]
+        and values.get("run interval") == f"{expected['StartInterval']} seconds"
+        and values.get("stdout path") == expected["StandardOutPath"]
+        and values.get("stderr path") == expected["StandardErrorPath"]
+        and ("runatload" in properties) == bool(expected["RunAtLoad"])
+    )
+
+
 def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
     paths = build_paths(info["repository_id"])
     plist_path = Path(paths["plist"])
@@ -298,9 +315,7 @@ def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
     if not health["loaded"]:
         health["errors"].append("LaunchAgent is not loaded")
     elif expected is not None:
-        health["loaded_configuration_matches"] = (
-            launchctl_arguments(loaded.stdout) == expected["ProgramArguments"]
-        )
+        health["loaded_configuration_matches"] = loaded_launch_agent_matches(loaded.stdout, expected)
         if not health["loaded_configuration_matches"]:
             health["errors"].append("Loaded LaunchAgent does not match the installed configuration")
     health["ok"] = bool(health["plist_exists"] and health["configuration_matches"]

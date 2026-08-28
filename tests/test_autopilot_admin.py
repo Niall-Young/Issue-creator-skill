@@ -90,18 +90,26 @@ class AutopilotAdminTests(unittest.TestCase):
         }):
             paths = ADMIN.build_paths("R_one")
             config = Path(paths["config"])
-            config.parent.mkdir(parents=True)
+            config.parent.mkdir(parents=True, exist_ok=True)
             config.write_text("{}\n", encoding="utf-8")
             if plist != "missing":
                 data = plistlib.loads(ADMIN.build_plist(paths, config))
                 if plist == "mismatched":
                     data["StartInterval"] = 60
-                Path(paths["plist"]).parent.mkdir(parents=True)
+                Path(paths["plist"]).parent.mkdir(parents=True, exist_ok=True)
                 Path(paths["plist"]).write_bytes(plistlib.dumps(data))
             expected = plistlib.loads(ADMIN.build_plist(paths, config))["ProgramArguments"]
             if loaded_config == "mismatched":
                 expected = [*expected[:-1], str(self.root / "stale-config.json")]
-            launchctl_output = "arguments = {\n" + "\n".join(f"\t\t{item}" for item in expected) + "\n\t}"
+            interval = 60 if loaded_config == "stale-interval" else 180
+            stdout = self.root / "stale.log" if loaded_config == "stale-path" else paths["stdout"]
+            launchctl_output = (
+                "arguments = {\n" + "\n".join(f"\t\t{item}" for item in expected) + "\n\t}\n"
+                f"stdout path = {stdout}\n"
+                f"stderr path = {paths['stderr']}\n"
+                f"run interval = {interval} seconds\n"
+                "properties = runatload | inferred program\n"
+            )
             launchctl = subprocess.CompletedProcess([], 0 if loaded else 113,
                                                     launchctl_output if loaded else "", "not loaded")
             with mock.patch.object(ADMIN, "marker", return_value={
@@ -147,6 +155,14 @@ class AutopilotAdminTests(unittest.TestCase):
         self.assertTrue(result["launch_agent"]["configuration_matches"])
         self.assertFalse(result["launch_agent"]["loaded_configuration_matches"])
         self.assertIn("Loaded LaunchAgent does not match", result["launch_agent"]["errors"][0])
+
+    def test_doctor_rejects_stale_loaded_interval_or_log_path(self) -> None:
+        for loaded_config in ("stale-interval", "stale-path"):
+            with self.subTest(loaded_config=loaded_config):
+                result = self.doctor_result(loaded_config=loaded_config)
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["launch_agent"]["configuration_matches"])
+                self.assertFalse(result["launch_agent"]["loaded_configuration_matches"])
 
     def test_stop_is_reflected_as_missing_and_unloaded_launchagent(self) -> None:
         with mock.patch.dict(os.environ, {
