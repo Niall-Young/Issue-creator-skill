@@ -84,7 +84,7 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 预期结果：技能先只读分析并展示工作包、base SHA、风险、预算和验证方案。用户批准后才允许本地修改；用户检查 diff 与证据并授权发布后，才允许 push 和创建 draft PR。仅提供仓库 URL 时，技能只输出有限候选批次，不会自动修复所有 Issue。
 
-在任意 macOS GitHub 项目中说“构建 Issue 循环检查机制”，Autopilot 会运行确定性安装器，创建缺失的 `agent-ready` 标签、仓库独立配置、LaunchAgent 与 Orca 协调器。全部合格 Issue 都会入账，最多三个在 Orca 左侧作为项目子 worktree 同时运行。安装时用 `--agent` 选择默认 Agent；单个 Issue 可用唯一 `agent:ID` 标签覆盖，冲突、禁用或不可用的 Agent 会停在可见的人工处理状态。满意时明确 `accept` 到当前干净的目标分支；它会在合并成功后关闭并回读对应 Issue，关闭失败则保留 worktree 供安全重试。不满意时明确 `retry --discard-worktree`。详见 [`configuration.md`](github-issue-autopilot/references/configuration.md)。
+在任意 macOS GitHub 项目中说“构建 Issue 循环检查机制”，Autopilot 会运行确定性安装器，创建缺失的 `agent-ready` 标签、仓库独立配置、LaunchAgent 与 Orca 协调器。全部合格 Issue 都会入账，最多三个在 Orca 左侧作为项目子 worktree 同时运行。安装时用 `--agent` 选择默认 Agent；单个 Issue 可用唯一 `agent:ID` 标签覆盖，冲突、禁用或不可用的 Agent 会停在可见的人工处理状态。满意时明确 `accept` 到当前干净的目标分支；它会在合并成功后关闭并回读对应 Issue，关闭失败则保留 worktree 供安全重试。若 worktree 已被手工清理，只有记录的修复 head 已在目标分支历史中时才能补关。不满意时明确 `retry --discard-worktree`。详见 [`configuration.md`](github-issue-autopilot/references/configuration.md)。
 
 ### 配置
 
@@ -218,7 +218,7 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 Expected result: the skill first performs read-only analysis and presents the package, base SHA, risk, budget, and verification plan. It may edit locally only after scope approval, and may push and create a draft PR only after the user reviews the diff and evidence and authorizes publication. With only a repository URL, it proposes a capped candidate batch instead of repairing every Issue.
 
-In any macOS GitHub checkout, ask the Agent to “build an Issue loop.” Autopilot creates the missing `agent-ready` label, repository-isolated configuration, a LaunchAgent, and an Orca coordinator. Every eligible Issue is recorded, and up to three run concurrently as visible child worktrees in the Orca sidebar. `--agent` selects the repository default; one `agent:ID` Issue label may override it, while conflicting, disallowed, or unavailable choices stop visibly for human action. Explicitly `accept` a satisfactory branch into a named clean target branch; after a successful merge, the command closes and reads back the matching Issue, preserving the worktree for a safe retry if closure fails. Use `retry --discard-worktree` for an unsatisfactory attempt. See [`configuration.md`](github-issue-autopilot/references/configuration.md).
+In any macOS GitHub checkout, ask the Agent to “build an Issue loop.” Autopilot creates the missing `agent-ready` label, repository-isolated configuration, a LaunchAgent, and an Orca coordinator. Every eligible Issue is recorded, and up to three run concurrently as visible child worktrees in the Orca sidebar. `--agent` selects the repository default; one `agent:ID` Issue label may override it, while conflicting, disallowed, or unavailable choices stop visibly for human action. Explicitly `accept` a satisfactory branch into a named clean target branch; after a successful merge, the command closes and reads back the matching Issue, preserving the worktree for a safe retry if closure fails. If the worktree was manually removed, closure proceeds only when the recorded repair head is already in the target branch history. Use `retry --discard-worktree` for an unsatisfactory attempt. See [`configuration.md`](github-issue-autopilot/references/configuration.md).
 
 ### Configuration
 

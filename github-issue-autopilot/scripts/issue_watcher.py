@@ -409,14 +409,21 @@ class Ledger:
         attempt = dict(self.connection.execute(
             "SELECT * FROM attempts WHERE node_id=? AND attempt_number=?", (issue["node_id"], issue["attempts"])
         ).fetchone())
-        validate_attempt(repo, attempt)
         if git(repo, "branch", "--show-current") != target_branch:
             raise WatcherError(f"target branch {target_branch} is not checked out")
         if git(repo, "status", "--porcelain"):
             raise WatcherError("target worktree must be clean before merging")
-        result = command(["git", "-C", str(repo), "merge", "--no-ff", "--no-edit", attempt["head_sha"]])
-        if result.returncode:
-            raise WatcherError(result.stderr.strip() or "local merge failed")
+        worktree_value = attempt.get("worktree_path")
+        registered = (isinstance(worktree_value, str) and Path(worktree_value).is_absolute()
+                      and Path(worktree_value).resolve() in worktree_paths(repo))
+        if registered:
+            validate_attempt(repo, attempt)
+            result = command(["git", "-C", str(repo), "merge", "--no-ff", "--no-edit",
+                              attempt["head_sha"]])
+            if result.returncode:
+                raise WatcherError(result.stderr.strip() or "local merge failed")
+        else:
+            validate_already_merged_attempt(repo, attempt)
         close_github_issue(url)
         self._update(issue["node_id"], issue["attempts"], "accepted",
                      {"summary": "merged locally and closed Issue"}, "accepted")
@@ -645,6 +652,23 @@ def validate_attempt(repo: Path, attempt: dict[str, Any]) -> None:
     if (state.get("base_sha") != attempt["base_sha"]
             or state.get("state") not in {"REVIEW", "AWAIT_PUBLICATION_APPROVAL"}):
         raise WatcherError("repair run ledger does not confirm a reviewed local result")
+
+
+def validate_already_merged_attempt(repo: Path, attempt: dict[str, Any]) -> None:
+    required = ("run_id", "worktree_path", "branch", "base_sha", "head_sha")
+    if any(not isinstance(attempt.get(key), str) or not attempt[key] for key in required):
+        raise WatcherError("successful receipt is missing worktree evidence")
+    for name in ("base_sha", "head_sha"):
+        if git(repo, "rev-parse", f"{attempt[name]}^{{commit}}") != attempt[name]:
+            raise WatcherError(f"receipt {name.removesuffix('_sha')} SHA is invalid")
+    state = repair_run_state(repo, attempt["run_id"])
+    if (state.get("base_sha") != attempt["base_sha"]
+            or state.get("state") not in {"REVIEW", "AWAIT_PUBLICATION_APPROVAL"}):
+        raise WatcherError("repair run ledger does not confirm a reviewed local result")
+    merged = command(["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                      attempt["head_sha"], "HEAD"])
+    if merged.returncode:
+        raise WatcherError("recorded head is not merged into the target branch")
 
 
 def repair_run_state(repo: Path, run_id: str) -> dict[str, Any]:
