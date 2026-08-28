@@ -73,7 +73,8 @@ class IssueWatcherTests(unittest.TestCase):
         state.parent.mkdir(parents=True)
         state.write_text(json.dumps({
             "run_id": run_id, "repository": str(self.repo.resolve()), "base_sha": base,
-            "state": "AWAIT_PUBLICATION_APPROVAL",
+            "source_url": self.issue()["url"], "state": "AWAIT_PUBLICATION_APPROVAL",
+            "receipts": {"commit": {"kind": "commit", "value": head}},
         }), encoding="utf-8")
         return {"run_id": run_id, "worktree_path": str(worktree), "branch": branch,
                 "base_sha": base, "head_sha": head}

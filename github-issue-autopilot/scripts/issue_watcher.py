@@ -423,7 +423,7 @@ class Ledger:
             if result.returncode:
                 raise WatcherError(result.stderr.strip() or "local merge failed")
         else:
-            validate_already_merged_attempt(repo, attempt)
+            validate_already_merged_attempt(repo, attempt, url)
         close_github_issue(url)
         self._update(issue["node_id"], issue["attempts"], "accepted",
                      {"summary": "merged locally and closed Issue"}, "accepted")
@@ -654,15 +654,19 @@ def validate_attempt(repo: Path, attempt: dict[str, Any]) -> None:
         raise WatcherError("repair run ledger does not confirm a reviewed local result")
 
 
-def validate_already_merged_attempt(repo: Path, attempt: dict[str, Any]) -> None:
+def validate_already_merged_attempt(repo: Path, attempt: dict[str, Any], url: str) -> None:
     required = ("run_id", "worktree_path", "branch", "base_sha", "head_sha")
     if any(not isinstance(attempt.get(key), str) or not attempt[key] for key in required):
         raise WatcherError("successful receipt is missing worktree evidence")
     for name in ("base_sha", "head_sha"):
         if git(repo, "rev-parse", f"{attempt[name]}^{{commit}}") != attempt[name]:
             raise WatcherError(f"receipt {name.removesuffix('_sha')} SHA is invalid")
-    state = repair_run_state(repo, attempt["run_id"])
+    state = load_repair_run_state(repo, attempt["run_id"])
+    commit_receipts = [receipt.get("value") for receipt in state.get("receipts", {}).values()
+                       if isinstance(receipt, dict) and receipt.get("kind") == "commit"]
     if (state.get("base_sha") != attempt["base_sha"]
+            or state.get("source_url") != url
+            or attempt["head_sha"] not in commit_receipts
             or state.get("state") not in {"REVIEW", "AWAIT_PUBLICATION_APPROVAL"}):
         raise WatcherError("repair run ledger does not confirm a reviewed local result")
     merged = command(["git", "-C", str(repo), "merge-base", "--is-ancestor",
@@ -672,6 +676,19 @@ def validate_already_merged_attempt(repo: Path, attempt: dict[str, Any]) -> None
 
 
 def repair_run_state(repo: Path, run_id: str) -> dict[str, Any]:
+    state = load_repair_run_state(repo, run_id)
+    common = git_common_dir(repo)
+    recorded_repo = Path(state.get("repository", "")).resolve()
+    try:
+        same_git_repository = git_common_dir(recorded_repo) == common
+    except (WatcherError, OSError):
+        same_git_repository = False
+    if recorded_repo != repo.resolve() and not same_git_repository:
+        raise WatcherError("repair run ledger belongs to a different run or repository")
+    return state
+
+
+def load_repair_run_state(repo: Path, run_id: str) -> dict[str, Any]:
     try:
         uuid.UUID(run_id)
     except ValueError as exc:
@@ -682,13 +699,8 @@ def repair_run_state(repo: Path, run_id: str) -> dict[str, Any]:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         raise WatcherError("repair run ledger is missing or invalid") from exc
-    recorded_repo = Path(state.get("repository", "")).resolve()
-    try:
-        same_git_repository = git_common_dir(recorded_repo) == common
-    except (WatcherError, OSError):
-        same_git_repository = False
-    if state.get("run_id") != run_id or (recorded_repo != repo.resolve() and not same_git_repository):
-        raise WatcherError("repair run ledger belongs to a different run or repository")
+    if state.get("run_id") != run_id:
+        raise WatcherError("repair run ledger belongs to a different run")
     return state
 
 
