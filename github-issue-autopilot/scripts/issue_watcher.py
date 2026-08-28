@@ -417,8 +417,11 @@ class Ledger:
         result = command(["git", "-C", str(repo), "merge", "--no-ff", "--no-edit", attempt["head_sha"]])
         if result.returncode:
             raise WatcherError(result.stderr.strip() or "local merge failed")
-        self._update(issue["node_id"], issue["attempts"], "accepted", {"summary": "merged locally"}, "accepted")
-        response = {"status": "accepted", "target_branch": target_branch, "head": git(repo, "rev-parse", "HEAD")}
+        close_github_issue(url)
+        self._update(issue["node_id"], issue["attempts"], "accepted",
+                     {"summary": "merged locally and closed Issue"}, "accepted")
+        response = {"status": "accepted", "target_branch": target_branch,
+                    "head": git(repo, "rev-parse", "HEAD"), "issue": "closed"}
         try:
             cleanup_attempt(repo, attempt, force=False, orca_cli=orca_cli)
         except WatcherError as exc:
@@ -464,6 +467,29 @@ def command(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedPro
         if result.returncode == 0 or "EOF" not in result.stderr or attempt == attempts - 1:
             return result
     return result
+
+
+def github_issue_state(url: str) -> str:
+    result = command(["gh", "issue", "view", url, "--json", "state,url"])
+    if result.returncode:
+        raise WatcherError(result.stderr.strip() or "could not read GitHub Issue state")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise WatcherError("gh issue view returned invalid JSON") from exc
+    if not isinstance(value, dict) or value.get("url") != url or value.get("state") not in {"OPEN", "CLOSED"}:
+        raise WatcherError("gh issue view returned an unexpected Issue")
+    return str(value["state"])
+
+
+def close_github_issue(url: str) -> None:
+    if github_issue_state(url) == "CLOSED":
+        return
+    result = command(["gh", "issue", "close", url, "--reason", "completed"])
+    if result.returncode and github_issue_state(url) != "CLOSED":
+        raise WatcherError(result.stderr.strip() or "GitHub Issue close failed")
+    if github_issue_state(url) != "CLOSED":
+        raise WatcherError("GitHub Issue remained open after close")
 
 
 def json_command(argv: list[str], cwd: Path | None = None) -> dict[str, Any]:

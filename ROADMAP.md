@@ -76,7 +76,7 @@
 
 - `github-issue-autopilot` 可为当前 macOS 仓库安装独立 LaunchAgent，用 `gh` 只读轮询并按作者、新建游标与 `agent-ready` 标签筛选。
 - SQLite WAL 账本用 node ID 去重并为每次 worktree 保存独立 attempt；事务领取与 Orca Task/Dispatch/worktree 标识阻止重复 worker，失败任务停在可见的 `needs-human` 而非盲目重派。
-- 成功 attempt 以 Git 回读验证 Orca worktree、记录分支和 base/head SHA 后进入 `ready-for-review`；人工可明确本地合并，或舍弃精确记录的 Orca worktree 后创建新 attempt。
+- 成功 attempt 以 Git 回读验证 Orca worktree、记录分支和 base/head SHA 后进入 `ready-for-review`；人工可明确验收，在本地合并成功后关闭并回读对应 Issue，或舍弃精确记录的 Orca worktree 后创建新 attempt。
 - 符合策略的 Issue 只预授权一个低/中风险本地工作包；远程发布固定为 `never`，merge 始终由人完成。
 - `launchd` 只保证 Orca 协调器终端存活；协调器一次记录全部合格 Issue，并维持最多三个可见 worker。无有效 `worker_done` 与 `AUTOPILOT_RESULT` 回执不得判定成功。
 
@@ -185,7 +185,7 @@ Implemented single-machine foundation:
 
 - `github-issue-autopilot` can install a repository-specific macOS LaunchAgent, performs read-only `gh` polling, and filters by author, new-Issue cursor, and the `agent-ready` label.
 - A SQLite WAL ledger deduplicates by node ID and records each worktree as a separate attempt. Transactional claims plus Orca Task/Dispatch/worktree identities block duplicate workers; failures stop visibly at `needs-human` instead of relaunching blindly.
-- A successful attempt becomes `ready-for-review` only after Git validates its Orca worktree, recorded branch, and base/head SHAs. A human can explicitly merge it locally or discard the exact Orca worktree before creating another attempt.
+- A successful attempt becomes `ready-for-review` only after Git validates its Orca worktree, recorded branch, and base/head SHAs. A human can explicitly accept it, closing and reading back the matching Issue after a successful local merge, or discard the exact Orca worktree before creating another attempt.
 - An eligible Issue pre-authorizes only one low/medium-risk local work package. Remote publication is fixed to `never`, and merge remains human-only.
 - `launchd` only keeps the Orca coordinator terminal alive. The coordinator records every eligible Issue and maintains up to three visible workers; neither missing `worker_done` nor a missing `AUTOPILOT_RESULT` can be reported as success.
 
