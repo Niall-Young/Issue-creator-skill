@@ -97,6 +97,22 @@ class IssueWatcherTests(unittest.TestCase):
                      "allowed_agents": ["codex", "claude"], "setup": "run"},
         }
 
+    def reconcile_invalid_output(self, receipt: str, show: dict) -> tuple[dict, dict]:
+        config, ledger = self.config(), self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-1", orca_dispatch_id="dispatch-1",
+        )
+        with mock.patch.object(WATCHER, "orca_call", side_effect=[
+            show, {"ok": True, "result": {"rows": [{"text": receipt}]}},
+            {"ok": True, "result": {}},
+        ]):
+            completed = WATCHER.reconcile_workers(config, ledger)
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        return completed[0], attempt
+
     def test_node_id_is_idempotent_and_edits_do_not_retrigger(self) -> None:
         ledger = self.ledger()
         issue = self.issue()
@@ -191,6 +207,28 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual(dt.datetime.min.replace(tzinfo=dt.timezone.utc),
                          list_issues.call_args.kwargs["created_after"])
 
+    def test_prompt_requires_literal_receipt_prefix_with_one_line_example(self) -> None:
+        prompt = WATCHER.prompt_for({
+            "url": self.issue()["url"], "attempt_number": 2, "run_id": "run-6",
+        }, self.config())
+        self.assertIn("literal prefix `AUTOPILOT_RESULT: `", prompt)
+        expected = ('AUTOPILOT_RESULT: {"status":"needs-human","summary":"explain why",'
+                    '"run_id":"<assigned run ID>","worktree_path":"<absolute worktree path>",'
+                    '"branch":"<assigned branch>"}')
+        receipt_lines = [line for line in prompt.splitlines() if line.startswith("AUTOPILOT_RESULT")]
+        self.assertEqual([expected], receipt_lines)
+        self.assertEqual("needs-human", WATCHER.parse_receipt(receipt_lines[0])["status"])
+
+    def test_parser_uses_last_valid_exact_receipt_line(self) -> None:
+        output = "\n".join([
+            'AUTOPILOT_RESULT: {"status":"blocked","summary":"older"}',
+            'debug: AUTOPILOT_RESULT: {"status":"failed","summary":"ordinary log"}',
+            'AUTOPILOT_RESULT: {"status":"needs-human","summary":"scope expanded"}',
+            'AUTOPILOT_RESULT: {not-json}',
+        ])
+        self.assertEqual({"status": "needs-human", "summary": "scope expanded"},
+                         WATCHER.parse_receipt(output))
+
     def test_unavailable_agent_still_creates_visible_blocked_worktree(self) -> None:
         config = self.config()
         config["orca"]["allowed_agents"] = ["codex"]
@@ -284,6 +322,25 @@ class IssueWatcherTests(unittest.TestCase):
             completed = WATCHER.reconcile_workers(config, ledger)
         self.assertEqual("ready-for-review", completed[0]["status"], completed)
         self.assertEqual("ready-for-review", ledger.snapshot()["issues"][0]["status"])
+
+    def test_completed_worker_records_missing_colon_diagnostic(self) -> None:
+        completed, attempt = self.reconcile_invalid_output(
+            'AUTOPILOT_RESULT {"status":"needs-human","summary":"scope expanded"}',
+            {"result": {"dispatch": {"status": "completed", "outcome": "succeeded"}}},
+        )
+        self.assertEqual("needs-human", completed["status"])
+        self.assertIn("missing required colon", completed["summary"])
+        self.assertIn("missing required colon", attempt["summary"])
+
+    def test_stalled_worker_with_invalid_json_receipt_finishes_needs_human(self) -> None:
+        completed, attempt = self.reconcile_invalid_output(
+            "AUTOPILOT_RESULT: {not-json}",
+            {"result": {"dispatch": {"status": "failed", "lastError": "agent_prompt_stalled"}}},
+        )
+        self.assertEqual("needs-human", completed["status"])
+        self.assertIn("invalid JSON", completed["summary"])
+        self.assertEqual("needs-human", attempt["status"])
+        self.assertIn("invalid JSON", attempt["summary"])
 
     def test_load_config_rejects_missing_activation_cutoff(self) -> None:
         path = self.root / "config.json"
