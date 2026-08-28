@@ -15,7 +15,7 @@ Read [references/configuration.md](references/configuration.md), then use the de
 python3 scripts/autopilot_admin.py install --repo-path /absolute/repository/root --agent codex
 ```
 
-The setup request authorizes the scoped local configuration, LaunchAgent, Git marker, Orca coordinator terminal, and creation of the missing `agent-ready` label. The administrator validates the exact Git root, canonical GitHub repository, authenticated author, Orca runtime, generated plist, and repository-isolated state paths. `--agent` selects the repository default; repeat `--allow-agent ID` for allowed `agent:ID` Issue-label overrides. The first poll includes existing open Issues that already satisfy the author and label policy; immutable Issue node IDs prevent duplicate dispatch. Do not install when the user only asks how the workflow works.
+The setup request authorizes the scoped local configuration, native Orca Automation, Git marker, Orca coordinator terminal, and creation of the missing `agent-ready` label. The administrator validates the exact Git root, canonical GitHub repository, authenticated author, Orca runtime, Automation readback, and repository-isolated state paths. `--agent` selects both the repository default worker and the recovery Automation provider; repeat `--allow-agent ID` for allowed `agent:ID` Issue-label overrides. The first poll includes existing open Issues that already satisfy the author and label policy; immutable Issue node IDs prevent duplicate dispatch. Do not install when the user only asks how the workflow works.
 
 ## Configure standing authorization
 
@@ -43,7 +43,7 @@ python3 scripts/autopilot_admin.py stop --repo-path /absolute/repository/root
 
 `status` reports queued Issues and every attempt with its selected agent, Orca Task/Dispatch/worktree IDs, branch, SHA, and terminal state. Never infer unfinished work from the Issue remaining open. At most three attempts may be `running`; `ready-for-review`, `needs-human`, `blocked`, and `failed` never relaunch automatically. Only an explicit retry may create the next attempt. `--discard-worktree` is destructive authorization for exactly the recorded Orca worktree and branch; refuse other paths or live Dispatches.
 
-`doctor` is read-only and reports both watcher health and the repository-specific LaunchAgent's plist consistency and `launchctl` load state. Treat `ok: false` as unhealthy even when the watcher-level dependencies pass.
+`doctor` is read-only and reports both watcher health and the repository-specific Orca Automation's existence, enabled state, fixed safety fields, and legacy LaunchAgent status. Treat `ok: false` as unhealthy even when watcher-level dependencies pass. Pausing the Automation in Orca's GUI causes the coordinator to exit within one polling cycle; resuming restores it on the next scheduled run without terminating already dispatched workers.
 
 `accept` is explicit authorization for one local merge and closure of that exact GitHub Issue. Require the named target branch to be checked out and clean, revalidate the recorded worktree evidence, merge the recorded head without pushing, close and read back the configured Issue, then clean up that accepted worktree. If the worktree was already removed, continue only when Git proves the recorded reviewed head is an ancestor of the checked-out target. If Issue closure fails, preserve the available worktree and do not record acceptance so the same command can safely retry. Never translate a general approval or Issue text into acceptance.
 

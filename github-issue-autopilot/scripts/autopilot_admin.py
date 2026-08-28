@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Any
 
 
+AUTOMATION_TRIGGER = "*/3 * * * *"
+AUTOMATION_PRECHECK_TIMEOUT_SECONDS = 60
+AUTOMATION_MISSED_RUN_GRACE_MINUTES = 5
+COORDINATOR_TITLE = "Issue Autopilot Coordinator"
+
+
 class AdminError(RuntimeError):
     pass
 
@@ -105,6 +111,7 @@ def build_paths(repository_id: str) -> dict[str, Path | str]:
         "runtime_watcher": root / "runtime" / "issue_watcher.py",
         "launch_label": label,
         "plist": launch_agents_dir() / f"{label}.plist",
+        "legacy_plist_backup": root / "legacy-launchd.plist",
     }
 
 
@@ -112,7 +119,7 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
                  paths: dict[str, Path | str], default_agent: str,
                  allowed_agents: list[str]) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "state_db": str(paths["database"]),
         "poll_interval_seconds": 180,
         "lease_timeout_seconds": 3000,
@@ -125,6 +132,17 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
         }],
         "orca": {"cli": orca, "default_agent": default_agent,
                  "allowed_agents": allowed_agents, "setup": "run"},
+        "scheduler": {
+            "backend": "orca-automation",
+            "automation_id": None,
+            "name": f"Issue Autopilot · {metadata['nameWithOwner']} · {paths['key']}",
+            "trigger": AUTOMATION_TRIGGER,
+            "provider": default_agent,
+            "workspace_mode": "existing",
+            "session_mode": "fresh",
+            "precheck_timeout_seconds": AUTOMATION_PRECHECK_TIMEOUT_SECONDS,
+            "missed_run_grace_minutes": AUTOMATION_MISSED_RUN_GRACE_MINUTES,
+        },
     }
 
 
@@ -149,6 +167,167 @@ def orca_json(orca: str, *args: str) -> dict[str, Any]:
     return value
 
 
+def scheduler_command(config_path: Path, operation: str) -> str:
+    runtime_admin = config_path.parent / "runtime" / "autopilot_admin.py"
+    return shlex.join([sys.executable, str(runtime_admin), operation, "--config", str(config_path)])
+
+
+def expected_automation(config: dict[str, Any], config_path: Path,
+                        enabled: bool) -> dict[str, Any]:
+    scheduler = config["scheduler"]
+    repository = config["repositories"][0]
+    ensure = scheduler_command(config_path, "ensure")
+    return {
+        "name": scheduler["name"],
+        "trigger": scheduler["trigger"],
+        "prompt": (
+            "Run the following command exactly once and return its JSON result. "
+            "Do not inspect Issues, modify repository files, or perform repair work in this session.\n\n"
+            f"{ensure}"
+        ),
+        "provider": scheduler["provider"],
+        "precheck": scheduler_command(config_path, "automation-precheck"),
+        "precheck_timeout_seconds": scheduler["precheck_timeout_seconds"],
+        "workspace": f"path:{repository['repo_path']}",
+        "workspace_mode": scheduler["workspace_mode"],
+        "session_mode": scheduler["session_mode"],
+        "missed_run_grace_minutes": scheduler["missed_run_grace_minutes"],
+        "enabled": enabled,
+    }
+
+
+def automation_arguments(config: dict[str, Any], config_path: Path,
+                         enabled: bool) -> list[str]:
+    expected = expected_automation(config, config_path, enabled)
+    return automation_spec_arguments(expected)
+
+
+def automation_spec_arguments(expected: dict[str, Any]) -> list[str]:
+    return [
+        "--name", expected["name"],
+        "--trigger", expected["trigger"],
+        "--prompt", expected["prompt"],
+        "--provider", expected["provider"],
+        "--precheck", expected["precheck"],
+        "--precheck-timeout", str(expected["precheck_timeout_seconds"]),
+        "--workspace", expected["workspace"],
+        "--workspace-mode", expected["workspace_mode"],
+        "--fresh-session",
+        "--missed-run-grace-minutes", str(expected["missed_run_grace_minutes"]),
+        "--enabled" if expected["enabled"] else "--disabled",
+    ]
+
+
+def automation_payload(value: dict[str, Any]) -> dict[str, Any]:
+    result = value.get("result", {})
+    if not isinstance(result, dict):
+        return {}
+    automation = result.get("automation", result)
+    return automation if isinstance(automation, dict) else {}
+
+
+def automation_id(value: dict[str, Any]) -> str | None:
+    automation = automation_payload(value)
+    identifier = automation.get("id") or automation.get("automationId")
+    return identifier if isinstance(identifier, str) and identifier else None
+
+
+def first_value(value: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in value:
+            return value[name]
+    return None
+
+
+def normalized_automation(value: dict[str, Any]) -> dict[str, Any]:
+    automation = automation_payload(value)
+    schedule = first_value(automation, "trigger", "schedule", "rrule")
+    if isinstance(schedule, dict):
+        schedule = first_value(schedule, "expression", "cron", "value")
+    workspace = first_value(automation, "workspace", "workspaceSelector")
+    if isinstance(workspace, dict):
+        workspace = first_value(workspace, "selector", "id", "path")
+        if isinstance(workspace, str) and workspace.startswith("/"):
+            workspace = f"path:{workspace}"
+    if workspace is None:
+        run_context = automation.get("runContext")
+        if isinstance(run_context, dict) and isinstance(run_context.get("path"), str):
+            workspace = f"path:{run_context['path']}"
+    session_mode = first_value(automation, "session_mode", "sessionMode")
+    if session_mode is None:
+        reused = first_value(automation, "reuseSession", "reuse_session")
+        if isinstance(reused, bool):
+            session_mode = "reuse" if reused else "fresh"
+    return {
+        "name": first_value(automation, "name"),
+        "trigger": schedule,
+        "prompt": first_value(automation, "prompt"),
+        "provider": first_value(automation, "provider", "providerId", "agent", "agentId"),
+        "precheck": (
+            automation.get("precheck", {}).get("command")
+            if isinstance(automation.get("precheck"), dict)
+            else first_value(automation, "precheck", "precheckCommand")
+        ),
+        "precheck_timeout_seconds": (
+            automation.get("precheck", {}).get("timeoutSeconds")
+            if isinstance(automation.get("precheck"), dict)
+            else first_value(automation, "precheck_timeout_seconds", "precheckTimeoutSeconds",
+                             "precheckTimeout")
+        ),
+        "workspace": workspace,
+        "workspace_mode": first_value(automation, "workspace_mode", "workspaceMode"),
+        "session_mode": session_mode,
+        "missed_run_grace_minutes": first_value(
+            automation, "missed_run_grace_minutes", "missedRunGraceMinutes"
+        ),
+        "enabled": bool(first_value(automation, "enabled", "isEnabled")),
+    }
+
+
+def scheduler_health(config_path: Path) -> dict[str, Any]:
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        scheduler = config.get("scheduler", {})
+        identifier = scheduler.get("automation_id")
+        if scheduler.get("backend") != "orca-automation" or not identifier:
+            raise AdminError("Orca Automation scheduler is not configured")
+        response = orca_json(config["orca"]["cli"], "automations", "show", identifier)
+        actual = normalized_automation(response)
+        expected = expected_automation(config, config_path, enabled=True)
+        configuration_keys = set(expected) - {"enabled"}
+        matches = all(actual.get(key) == expected[key] for key in configuration_keys)
+        errors: list[str] = []
+        if not actual["enabled"]:
+            errors.append("Orca Automation is paused")
+        if not matches:
+            errors.append("Orca Automation does not match the installed configuration")
+        return {"ok": bool(actual["enabled"] and matches), "backend": "orca-automation",
+                "automation_id": identifier, "exists": True, "enabled": actual["enabled"],
+                "configuration_matches": matches, "errors": errors}
+    except (AdminError, OSError, KeyError, json.JSONDecodeError) as exc:
+        return {"ok": False, "backend": "orca-automation", "automation_id": None,
+                "exists": False, "enabled": False, "configuration_matches": False,
+                "errors": [str(exc)]}
+
+
+def automation_precheck(config_path: Path) -> dict[str, Any]:
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        orca = config["orca"]["cli"]
+        repository = config["repositories"][0]
+        terminals = orca_json(orca, "terminal", "list", "--worktree",
+                              f"path:{repository['repo_path']}")
+        connected = [item for item in terminals.get("result", {}).get("terminals", [])
+                     if item.get("title") == COORDINATOR_TITLE and item.get("connected")]
+        if len(connected) == 1:
+            return {"status": "healthy", "run_automation": False,
+                    "terminal": connected[0].get("handle")}
+        return {"status": "needs-recovery", "run_automation": True,
+                "connected_coordinators": len(connected)}
+    except (AdminError, OSError, KeyError, json.JSONDecodeError) as exc:
+        return {"status": "needs-recovery", "run_automation": True, "error": str(exc)}
+
+
 def ensure_coordinator(config_path: Path) -> dict[str, Any]:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     orca = config["orca"]["cli"]
@@ -159,13 +338,16 @@ def ensure_coordinator(config_path: Path) -> dict[str, Any]:
     worktree = f"path:{repository['repo_path']}"
     terminals = orca_json(orca, "terminal", "list", "--worktree", worktree)
     existing = [item for item in terminals.get("result", {}).get("terminals", [])
-                if item.get("title") == "Issue Autopilot Coordinator" and item.get("connected")]
-    if existing:
+                if item.get("title") == COORDINATOR_TITLE and item.get("connected")]
+    if len(existing) == 1:
         return {"status": "running", "terminal": existing[0].get("handle")}
+    for item in existing:
+        if item.get("handle"):
+            orca_json(orca, "terminal", "close", "--terminal", item["handle"])
     paths = build_paths(repository["repository_id"])
     argv = [sys.executable, str(paths["runtime_watcher"]), "run", "--config", str(config_path)]
     created = orca_json(orca, "terminal", "create", "--worktree", worktree,
-                        "--title", "Issue Autopilot Coordinator", "--command", shlex.join(argv))
+                        "--title", COORDINATOR_TITLE, "--command", f"exec {shlex.join(argv)}")
     terminal = created.get("result", {}).get("terminal", created.get("result", {}))
     return {"status": "started", "terminal": terminal.get("handle")}
 
@@ -179,10 +361,117 @@ def ensure_label(repository: str, label: str) -> bool:
     return True
 
 
+def list_automations(orca: str) -> list[dict[str, Any]]:
+    response = orca_json(orca, "automations", "list")
+    result = response.get("result", {})
+    items = result.get("automations", []) if isinstance(result, dict) else []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def configure_automation(config: dict[str, Any], config_path: Path,
+                         enabled: bool) -> tuple[str, bool, dict[str, Any] | None]:
+    orca = config["orca"]["cli"]
+    scheduler = config["scheduler"]
+    identifier = scheduler.get("automation_id")
+    created = False
+    previous: dict[str, Any] | None = None
+    if identifier:
+        try:
+            previous = normalized_automation(
+                orca_json(orca, "automations", "show", identifier)
+            )
+        except AdminError:
+            identifier = None
+    if not identifier:
+        matches = [item for item in list_automations(orca)
+                   if item.get("name") == scheduler["name"]]
+        if len(matches) > 1:
+            raise AdminError("multiple Orca Automations use the repository scheduler name")
+        if matches:
+            identifier = matches[0].get("id") or matches[0].get("automationId")
+            if identifier:
+                previous = normalized_automation(
+                    orca_json(orca, "automations", "show", identifier)
+                )
+        else:
+            response = orca_json(orca, "automations", "create",
+                                 *automation_arguments(config, config_path, enabled=False))
+            identifier = automation_id(response)
+            created = True
+            if not identifier:
+                matches = [item for item in list_automations(orca)
+                           if item.get("name") == scheduler["name"]]
+                if len(matches) == 1:
+                    identifier = matches[0].get("id") or matches[0].get("automationId")
+    if not isinstance(identifier, str) or not identifier:
+        raise AdminError("Orca did not return a unique Automation ID")
+    scheduler["automation_id"] = identifier
+    atomic_write(config_path, (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode())
+    orca_json(orca, "automations", "edit", identifier,
+              *automation_arguments(config, config_path, enabled=enabled))
+    return identifier, created, previous
+
+
+def close_coordinators(config: dict[str, Any]) -> int:
+    orca = config["orca"]["cli"]
+    repository = config["repositories"][0]
+    terminals = orca_json(orca, "terminal", "list", "--worktree",
+                          f"path:{repository['repo_path']}")
+    closed = 0
+    for item in terminals.get("result", {}).get("terminals", []):
+        if item.get("title") == COORDINATOR_TITLE and item.get("handle"):
+            orca_json(orca, "terminal", "close", "--terminal", item["handle"])
+            closed += 1
+    return closed
+
+
+def disable_legacy_launch_agent(paths: dict[str, Path | str]) -> dict[str, Any]:
+    plist_path = Path(paths["plist"])
+    backup_path = Path(paths["legacy_plist_backup"])
+    domain = f"gui/{os.getuid()}"
+    loaded = command(["launchctl", "print", f"{domain}/{paths['launch_label']}"]).returncode == 0
+    if loaded:
+        stopped = command(["launchctl", "bootout", domain, str(plist_path)])
+        if stopped.returncode and command(
+            ["launchctl", "print", f"{domain}/{paths['launch_label']}"]
+        ).returncode == 0:
+            raise AdminError(stopped.stderr.strip() or "failed to stop legacy LaunchAgent")
+    if plist_path.exists():
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        if backup_path.exists():
+            backup_path.unlink()
+        os.replace(plist_path, backup_path)
+    return {"was_loaded": loaded, "backup": str(backup_path) if backup_path.exists() else None}
+
+
+def file_snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
+    return {path: path.read_bytes() if path.exists() else None for path in paths}
+
+
+def restore_files(snapshot: dict[Path, bytes | None]) -> None:
+    for path, data in snapshot.items():
+        if data is None:
+            if path.exists():
+                path.unlink()
+        else:
+            atomic_write(path, data)
+
+
+def restore_legacy_launch_agent(paths: dict[str, Path | str], was_loaded: bool) -> None:
+    plist_path = Path(paths["plist"])
+    backup_path = Path(paths["legacy_plist_backup"])
+    if not plist_path.exists() and backup_path.exists():
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(backup_path, plist_path)
+    if was_loaded and plist_path.exists():
+        domain = f"gui/{os.getuid()}"
+        command(["launchctl", "bootout", domain, str(plist_path)])
+        checked(["launchctl", "bootstrap", domain, str(plist_path)])
+        checked(["launchctl", "kickstart", f"{domain}/{paths['launch_label']}"])
+
+
 def install(repo_path: Path, label: str, default_agent: str, allowed_agents: list[str],
             load: bool = True) -> dict[str, Any]:
-    if sys.platform != "darwin":
-        raise AdminError("automatic installation currently requires macOS launchd")
     repo = repository_root(repo_path)
     login_result = command(["gh", "api", "user", "--jq", ".login"])
     if login_result.returncode:
@@ -197,28 +486,81 @@ def install(repo_path: Path, label: str, default_agent: str, allowed_agents: lis
     config = build_config(repo, metadata, login, str(Path(orca).resolve()), label, paths,
                           default_agent, allowed_agents)
     label_created = ensure_label(metadata["nameWithOwner"], label)
-    config_path, plist_path = Path(paths["config"]), Path(paths["plist"])
+    config_path = Path(paths["config"])
+    marker_path = git_common_dir(repo) / "github-issue-autopilot.json"
+    if config_path.exists():
+        try:
+            previous_config = json.loads(config_path.read_text(encoding="utf-8"))
+            previous_scheduler = previous_config.get("scheduler", {})
+            if previous_scheduler.get("backend") == "orca-automation":
+                config["scheduler"]["automation_id"] = previous_scheduler.get("automation_id")
+        except (OSError, json.JSONDecodeError):
+            pass
+    managed_files = [config_path, Path(paths["runtime_admin"]), Path(paths["runtime_watcher"]),
+                     marker_path, Path(paths["plist"]), Path(paths["legacy_plist_backup"])]
+    snapshot = file_snapshot(managed_files)
+    legacy_was_loaded = command(
+        ["launchctl", "print", f"gui/{os.getuid()}/{paths['launch_label']}"]
+    ).returncode == 0 if sys.platform == "darwin" else False
+    created_automation: str | None = None
+    previous_automation: dict[str, Any] | None = None
+    identifier: str | None = None
     try:
         atomic_write(config_path, (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode())
         atomic_write(Path(paths["runtime_admin"]), Path(__file__).read_bytes())
         atomic_write(Path(paths["runtime_watcher"]), Path(__file__).resolve().with_name("issue_watcher.py").read_bytes())
-        atomic_write(plist_path, build_plist(paths, config_path))
-        marker = {"schema_version": 2, "config": str(config_path), "label": label,
-                  "repository_id": metadata["id"], "repository": metadata["nameWithOwner"]}
-        atomic_write(git_common_dir(repo) / "github-issue-autopilot.json",
-                     (json.dumps(marker, ensure_ascii=False, indent=2) + "\n").encode())
-        checked(["plutil", "-lint", str(plist_path)])
+        identifier, created, previous_automation = configure_automation(
+            config, config_path, enabled=load
+        )
+        if created:
+            created_automation = identifier
+        marker_value = {"schema_version": 3, "config": str(config_path), "label": label,
+                        "repository_id": metadata["id"], "repository": metadata["nameWithOwner"],
+                        "scheduler": {"backend": "orca-automation", "automation_id": identifier}}
+        atomic_write(marker_path,
+                     (json.dumps(marker_value, ensure_ascii=False, indent=2) + "\n").encode())
+        legacy = {"was_loaded": False, "backup": None}
+        if sys.platform == "darwin":
+            legacy = disable_legacy_launch_agent(paths)
         if load:
-            domain = f"gui/{os.getuid()}"
-            command(["launchctl", "bootout", domain, str(plist_path)])
-            checked(["launchctl", "bootstrap", domain, str(plist_path)])
-            checked(["launchctl", "kickstart", f"{domain}/{paths['launch_label']}"])
+            close_coordinators(config)
+            coordinator = ensure_coordinator(config_path)
+        else:
+            close_coordinators(config)
+            coordinator = {"status": "disabled", "terminal": None}
+        health = scheduler_health(config_path)
+        if load and not health["ok"]:
+            raise AdminError("Orca Automation failed post-install verification: "
+                             + "; ".join(health["errors"]))
     except (AdminError, OSError) as exc:
+        try:
+            close_coordinators(config)
+        except (AdminError, OSError, KeyError):
+            pass
+        if created_automation:
+            try:
+                orca_json(str(Path(orca).resolve()), "automations", "remove", created_automation)
+            except (AdminError, OSError):
+                pass
+        elif identifier and previous_automation:
+            try:
+                orca_json(str(Path(orca).resolve()), "automations", "edit", identifier,
+                          *automation_spec_arguments(previous_automation))
+            except (AdminError, OSError):
+                pass
+        restore_files(snapshot)
+        if sys.platform == "darwin":
+            try:
+                restore_legacy_launch_agent(paths, legacy_was_loaded)
+            except (AdminError, OSError):
+                pass
         suffix = f"; GitHub label {label} was created and remains" if label_created else ""
         raise AdminError(f"{exc}{suffix}") from exc
     return {"status": "installed", "repository": metadata["nameWithOwner"], "label": label,
-            "label_created": label_created, "config": str(config_path), "plist": str(plist_path),
-            "launch_label": paths["launch_label"], "loaded": load, "default_agent": default_agent,
+            "label_created": label_created, "config": str(config_path),
+            "scheduler": "orca-automation", "automation_id": identifier,
+            "automation_enabled": load, "coordinator": coordinator,
+            "legacy_launch_agent": legacy, "default_agent": default_agent,
             "allowed_agents": allowed_agents}
 
 
@@ -324,13 +666,49 @@ def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
 def doctor(repo_path: Path) -> dict[str, Any]:
     info = marker(repo_path)
     result = dict(run_watcher(repo_path, "doctor"))
-    result["launch_agent"] = launch_agent_health(info)
-    result["ok"] = bool(result.get("ok") and result["launch_agent"]["ok"])
+    config_path = Path(info["config"])
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    if config.get("schema_version") == 3:
+        result["scheduler"] = scheduler_health(config_path)
+        paths = build_paths(info["repository_id"])
+        legacy_loaded = command([
+            "launchctl", "print", f"gui/{os.getuid()}/{paths['launch_label']}"
+        ]).returncode == 0 if sys.platform == "darwin" else False
+        result["legacy_launch_agent"] = {
+            "loaded": legacy_loaded,
+            "backup": str(paths["legacy_plist_backup"])
+            if Path(paths["legacy_plist_backup"]).exists() else None,
+        }
+        if legacy_loaded:
+            result["scheduler"]["errors"].append("legacy LaunchAgent is still loaded")
+            result["scheduler"]["ok"] = False
+        result["ok"] = bool(result.get("ok") and result["scheduler"]["ok"])
+    else:
+        result["launch_agent"] = launch_agent_health(info)
+        result["ok"] = bool(result.get("ok") and result["launch_agent"]["ok"])
     return result
 
 
 def stop(repo_path: Path) -> dict[str, Any]:
     info = marker(repo_path)
+    config_path = Path(info["config"])
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AdminError(f"cannot read Autopilot configuration: {exc}") from exc
+    if config.get("schema_version") == 3:
+        scheduler = config.get("scheduler", {})
+        identifier = scheduler.get("automation_id")
+        if not identifier:
+            raise AdminError("Orca Automation ID is missing")
+        orca_json(config["orca"]["cli"], "automations", "edit", identifier, "--disabled")
+        close_coordinators(config)
+        return {"status": "stopped", "repository": info["repository"],
+                "state_preserved": True, "automation_id": identifier,
+                "automation_enabled": False}
     paths = build_paths(info["repository_id"])
     domain = f"gui/{os.getuid()}"
     plist_path = Path(paths["plist"])
@@ -349,7 +727,7 @@ def stop(repo_path: Path) -> dict[str, Any]:
         if orca:
             terminals = orca_json(orca, "terminal", "list", "--worktree", f"path:{repository_root(repo_path)}")
             for item in terminals.get("result", {}).get("terminals", []):
-                if item.get("title") == "Issue Autopilot Coordinator" and item.get("handle"):
+                if item.get("title") == COORDINATOR_TITLE and item.get("handle"):
                     orca_json(orca, "terminal", "close", "--terminal", item["handle"])
     except (AdminError, OSError, json.JSONDecodeError):
         pass
@@ -366,12 +744,17 @@ def parser() -> argparse.ArgumentParser:
     install_parser.add_argument("--agent", default="codex", help="repository default Orca agent ID")
     install_parser.add_argument("--allow-agent", action="append", default=[],
                                 help="additional agent:<id> label override allowed for this repository")
-    install_parser.add_argument("--no-load", action="store_true", help="write and validate without loading launchd")
+    install_parser.add_argument("--disabled", action="store_true",
+                                help="create or update the Orca Automation without enabling it")
+    install_parser.add_argument("--no-load", action="store_true",
+                                help="deprecated alias for --disabled")
     for name in ("doctor", "status", "stop"):
         sub = commands.add_parser(name)
         sub.add_argument("--repo-path", type=Path, default=Path.cwd())
     ensure = commands.add_parser("ensure")
     ensure.add_argument("--config", type=Path, required=True)
+    precheck = commands.add_parser("automation-precheck")
+    precheck.add_argument("--config", type=Path, required=True)
     retry = commands.add_parser("retry")
     retry.add_argument("--repo-path", type=Path, default=Path.cwd())
     retry.add_argument("--issue-url", required=True)
@@ -387,9 +770,12 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.operation == "install":
-            result = install(args.repo_path, args.label, args.agent, args.allow_agent, not args.no_load)
+            result = install(args.repo_path, args.label, args.agent, args.allow_agent,
+                             not (args.disabled or args.no_load))
         elif args.operation == "ensure":
             result = ensure_coordinator(args.config)
+        elif args.operation == "automation-precheck":
+            result = automation_precheck(args.config)
         elif args.operation == "stop":
             result = stop(args.repo_path)
         elif args.operation == "doctor":
@@ -408,6 +794,8 @@ def main() -> int:
         print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    if args.operation == "automation-precheck":
+        return 0 if result.get("run_automation") else 1
     return 2 if args.operation == "doctor" and not result.get("ok") else 0
 
 

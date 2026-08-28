@@ -62,17 +62,176 @@ class AutopilotAdminTests(unittest.TestCase):
         self.assertEqual(0, lint.returncode, lint.stderr)
 
     def test_config_uses_orca_and_user_selected_default_agent(self) -> None:
-        paths = {"database": self.root / "state.sqlite3"}
+        paths = {"database": self.root / "state.sqlite3", "key": "abc123",
+                 "runtime_admin": self.root / "runtime" / "autopilot_admin.py"}
         value = ADMIN.build_config(
             self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
             "agent-ready", paths, "claude", ["claude", "codex"],
         )
+        self.assertEqual(3, value["schema_version"])
         self.assertEqual(["agent-ready"], value["repositories"][0]["labels"])
         self.assertEqual("never", value["policy"]["publication"])
         self.assertEqual("claude", value["orca"]["default_agent"])
         self.assertEqual(["claude", "codex"], value["orca"]["allowed_agents"])
+        self.assertEqual("orca-automation", value["scheduler"]["backend"])
+        self.assertEqual("*/3 * * * *", value["scheduler"]["trigger"])
+        self.assertEqual("fresh", value["scheduler"]["session_mode"])
+        self.assertIsNone(value["scheduler"]["automation_id"])
         self.assertNotIn("activate_after", value["repositories"][0])
         self.assertNotIn("executor", value)
+
+    def test_automation_arguments_use_existing_workspace_and_safe_precheck(self) -> None:
+        paths = {"database": self.root / "state.sqlite3", "key": "abc123",
+                 "runtime_admin": self.root / "runtime" / "autopilot_admin.py"}
+        config_path = self.root / "autopilot.json"
+        value = ADMIN.build_config(
+            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
+            "agent-ready", paths, "codex", ["codex"],
+        )
+        arguments = ADMIN.automation_arguments(value, config_path, enabled=False)
+        self.assertIn("*/3 * * * *", arguments)
+        self.assertIn(f"path:{self.repo}", arguments)
+        self.assertIn("--fresh-session", arguments)
+        self.assertIn("--disabled", arguments)
+        precheck = arguments[arguments.index("--precheck") + 1]
+        self.assertIn("automation-precheck", precheck)
+        self.assertIn(str(config_path), precheck)
+        prompt = arguments[arguments.index("--prompt") + 1]
+        self.assertIn("ensure", prompt)
+        self.assertIn("Do not inspect Issues", prompt)
+
+    def test_precheck_skips_only_for_one_connected_coordinator(self) -> None:
+        config = self.root / "autopilot.json"
+        config.write_text(json.dumps({
+            "repositories": [{"repo_path": str(self.repo)}],
+            "orca": {"cli": "/bin/orca"},
+        }), encoding="utf-8")
+        connected = {"result": {"terminals": [
+            {"title": "Issue Autopilot Coordinator", "connected": True, "handle": "t1"}
+        ]}}
+        with mock.patch.object(ADMIN, "orca_json", return_value=connected):
+            result = ADMIN.automation_precheck(config)
+        self.assertEqual("healthy", result["status"])
+        self.assertFalse(result["run_automation"])
+        with mock.patch.object(ADMIN, "orca_json", return_value={"result": {"terminals": []}}):
+            result = ADMIN.automation_precheck(config)
+        self.assertEqual("needs-recovery", result["status"])
+        self.assertTrue(result["run_automation"])
+
+    def test_coordinator_replaces_shell_so_exit_disconnects_terminal(self) -> None:
+        config = self.root / "autopilot.json"
+        config.write_text(json.dumps({
+            "repositories": [{"repository_id": "R_one", "repo_path": str(self.repo)}],
+            "orca": {"cli": "/bin/orca"},
+        }), encoding="utf-8")
+        responses = [
+            {"result": {"runtime": {"state": "ready"}}},
+            {"result": {"terminals": []}},
+            {"result": {"terminal": {"handle": "t1"}}},
+        ]
+        with mock.patch.object(ADMIN, "orca_json", side_effect=responses) as call:
+            result = ADMIN.ensure_coordinator(config)
+        self.assertEqual("started", result["status"])
+        create_args = call.call_args_list[-1].args
+        command_value = create_args[create_args.index("--command") + 1]
+        self.assertTrue(command_value.startswith("exec "))
+        self.assertIn("issue_watcher.py run", command_value)
+
+    def test_ensure_replaces_duplicate_connected_coordinators(self) -> None:
+        config = self.root / "autopilot.json"
+        config.write_text(json.dumps({
+            "repositories": [{"repository_id": "R_one", "repo_path": str(self.repo)}],
+            "orca": {"cli": "/bin/orca"},
+        }), encoding="utf-8")
+        responses = [
+            {"result": {"runtime": {"state": "ready"}}},
+            {"result": {"terminals": [
+                {"title": "Issue Autopilot Coordinator", "connected": True, "handle": "old-1"},
+                {"title": "Issue Autopilot Coordinator", "connected": True, "handle": "old-2"},
+            ]}},
+            {"result": {"close": {"handle": "old-1"}}},
+            {"result": {"close": {"handle": "old-2"}}},
+            {"result": {"terminal": {"handle": "new"}}},
+        ]
+        with mock.patch.object(ADMIN, "orca_json", side_effect=responses) as call:
+            result = ADMIN.ensure_coordinator(config)
+        self.assertEqual({"status": "started", "terminal": "new"}, result)
+        close_calls = [item.args for item in call.call_args_list if "close" in item.args]
+        self.assertEqual(2, len(close_calls))
+
+    def test_scheduler_health_accepts_exact_enabled_automation(self) -> None:
+        paths = {"database": self.root / "state.sqlite3", "key": "abc123",
+                 "runtime_admin": self.root / "runtime" / "autopilot_admin.py"}
+        config_path = self.root / "autopilot.json"
+        config = ADMIN.build_config(
+            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
+            "agent-ready", paths, "codex", ["codex"],
+        )
+        config["scheduler"]["automation_id"] = "auto-1"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        automation = ADMIN.expected_automation(config, config_path, enabled=True)
+        with mock.patch.object(ADMIN, "orca_json", return_value={
+            "result": {"automation": {"id": "auto-1", **automation}}
+        }):
+            health = ADMIN.scheduler_health(config_path)
+        self.assertTrue(health["ok"])
+        self.assertTrue(health["enabled"])
+        self.assertTrue(health["configuration_matches"])
+
+    def test_scheduler_health_rejects_paused_or_drifted_automation(self) -> None:
+        paths = {"database": self.root / "state.sqlite3", "key": "abc123",
+                 "runtime_admin": self.root / "runtime" / "autopilot_admin.py"}
+        config_path = self.root / "autopilot.json"
+        config = ADMIN.build_config(
+            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
+            "agent-ready", paths, "codex", ["codex"],
+        )
+        config["scheduler"]["automation_id"] = "auto-1"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        automation = ADMIN.expected_automation(config, config_path, enabled=False)
+        automation["trigger"] = "hourly"
+        with mock.patch.object(ADMIN, "orca_json", return_value={
+            "result": {"automation": {"id": "auto-1", **automation}}
+        }):
+            health = ADMIN.scheduler_health(config_path)
+        self.assertFalse(health["ok"])
+        self.assertFalse(health["enabled"])
+        self.assertFalse(health["configuration_matches"])
+
+    def test_paused_exact_automation_is_not_reported_as_configuration_drift(self) -> None:
+        paths = {"database": self.root / "state.sqlite3", "key": "abc123",
+                 "runtime_admin": self.root / "runtime" / "autopilot_admin.py"}
+        config_path = self.root / "autopilot.json"
+        config = ADMIN.build_config(
+            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
+            "agent-ready", paths, "codex", ["codex"],
+        )
+        config["scheduler"]["automation_id"] = "auto-1"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        automation = ADMIN.expected_automation(config, config_path, enabled=False)
+        with mock.patch.object(ADMIN, "orca_json", return_value={
+            "result": {"automation": {"id": "auto-1", **automation}}
+        }):
+            health = ADMIN.scheduler_health(config_path)
+        self.assertFalse(health["ok"])
+        self.assertFalse(health["enabled"])
+        self.assertTrue(health["configuration_matches"])
+        self.assertEqual(["Orca Automation is paused"], health["errors"])
+
+    def test_normalizes_real_orca_automation_shape(self) -> None:
+        normalized = ADMIN.normalized_automation({"result": {"automation": {
+            "name": "Issue Autopilot", "prompt": "ensure", "agentId": "codex",
+            "precheck": {"command": "precheck", "timeoutSeconds": 60},
+            "runContext": {"path": str(self.repo)}, "workspaceMode": "existing",
+            "reuseSession": False, "rrule": "*/3 * * * *", "enabled": True,
+            "missedRunGraceMinutes": 5,
+        }}})
+        self.assertEqual("*/3 * * * *", normalized["trigger"])
+        self.assertEqual("codex", normalized["provider"])
+        self.assertEqual("precheck", normalized["precheck"])
+        self.assertEqual(60, normalized["precheck_timeout_seconds"])
+        self.assertEqual(f"path:{self.repo}", normalized["workspace"])
+        self.assertEqual("fresh", normalized["session_mode"])
 
     def test_github_command_retries_transient_eof(self) -> None:
         failed = subprocess.CompletedProcess(["gh", "api", "user"], 1, "", "request: EOF")

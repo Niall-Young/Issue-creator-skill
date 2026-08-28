@@ -62,6 +62,61 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual(2, run.call_count)
         self.assertEqual("http2client=0", run.call_args.kwargs["env"]["GODEBUG"])
 
+    def test_schema_v3_requires_orca_automation_identity(self) -> None:
+        config = self.config()
+        config["schema_version"] = 3
+        config["state_db"] = str(config["state_db"])
+        config["repositories"][0]["repo_path"] = str(self.repo)
+        path = self.root / "autopilot.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        with self.assertRaisesRegex(WATCHER.WatcherError, "scheduler ID"):
+            WATCHER.load_config(path)
+        config["scheduler"] = {"backend": "orca-automation", "automation_id": "auto-1"}
+        path.write_text(json.dumps(config), encoding="utf-8")
+        loaded = WATCHER.load_config(path)
+        self.assertEqual("auto-1", loaded["scheduler"]["automation_id"])
+
+    def test_scheduler_enabled_reads_native_automation_state(self) -> None:
+        config = self.config()
+        config["schema_version"] = 3
+        config["scheduler"] = {"backend": "orca-automation", "automation_id": "auto-1"}
+        with mock.patch.object(WATCHER, "orca_call", return_value={
+            "result": {"automation": {"enabled": True}}
+        }) as call:
+            self.assertTrue(WATCHER.scheduler_enabled(config))
+        call.assert_called_once_with(config, "automations", "show", "auto-1")
+        with mock.patch.object(WATCHER, "orca_call", return_value={
+            "result": {"automation": {"enabled": False}}
+        }):
+            self.assertFalse(WATCHER.scheduler_enabled(config))
+
+    def test_schema_v2_coordinator_remains_compatible_during_migration(self) -> None:
+        self.assertTrue(WATCHER.scheduler_enabled(self.config()))
+
+    def test_run_exits_cleanly_when_native_automation_is_paused(self) -> None:
+        config = self.config()
+        config["schema_version"] = 3
+        config["scheduler"] = {"backend": "orca-automation", "automation_id": "auto-1"}
+        with mock.patch.object(WATCHER.sys, "argv", [
+            "issue_watcher.py", "run", "--config", str(self.root / "config.json")
+        ]), mock.patch.object(WATCHER, "load_config", return_value=config), mock.patch.object(
+            WATCHER, "scheduler_enabled", return_value=False
+        ), mock.patch("builtins.print") as output:
+            self.assertEqual(0, WATCHER.main())
+        self.assertIn("scheduler-paused", output.call_args.args[0])
+
+    def test_run_exits_nonzero_when_scheduler_status_is_unavailable(self) -> None:
+        config = self.config()
+        config["schema_version"] = 3
+        config["scheduler"] = {"backend": "orca-automation", "automation_id": "auto-1"}
+        with mock.patch.object(WATCHER.sys, "argv", [
+            "issue_watcher.py", "run", "--config", str(self.root / "config.json")
+        ]), mock.patch.object(WATCHER, "load_config", return_value=config), mock.patch.object(
+            WATCHER, "scheduler_enabled", side_effect=WATCHER.WatcherError("Automation missing")
+        ), mock.patch("builtins.print") as output:
+            self.assertEqual(2, WATCHER.main())
+        self.assertIn("scheduler-unavailable", output.call_args.args[0])
+
     def repair_evidence(self, worktree: Path, branch: str, base: str, head: str) -> dict:
         run_id = str(uuid.uuid4())
         common = subprocess.run(

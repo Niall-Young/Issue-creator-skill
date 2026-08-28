@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION = 2
+CONFIG_VERSIONS = {2, 3}
 LEDGER_VERSION = 3
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 RECEIPT = re.compile(r"(?m)^AUTOPILOT_RESULT: (\{[^\r\n]+\})[ \t]*$")
@@ -70,8 +70,8 @@ def expand_path(value: str, base: Path) -> Path:
 
 def load_config(path: Path) -> dict[str, Any]:
     config = load_object(path)
-    if config.get("schema_version") != CONFIG_VERSION:
-        raise WatcherError("config schema_version must be 2")
+    if config.get("schema_version") not in CONFIG_VERSIONS:
+        raise WatcherError("config schema_version must be 2 or 3")
     base = path.resolve().parent
     config["state_db"] = expand_path(str(config.get("state_db", "autopilot.sqlite3")), base)
     repositories = config.get("repositories")
@@ -125,6 +125,13 @@ def load_config(path: Path) -> dict[str, Any]:
     if policy.get("max_risk", "medium") not in {"low", "medium"}:
         raise WatcherError("policy.max_risk must be low or medium")
     config["policy"] = policy
+    if config.get("schema_version") == 3:
+        scheduler = config.get("scheduler")
+        if (not isinstance(scheduler, dict)
+                or scheduler.get("backend") != "orca-automation"
+                or not isinstance(scheduler.get("automation_id"), str)
+                or not scheduler["automation_id"]):
+            raise WatcherError("schema v3 requires an Orca Automation scheduler ID")
     return config
 
 
@@ -1102,6 +1109,23 @@ def doctor(config: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def scheduler_enabled(config: dict[str, Any]) -> bool:
+    if config.get("schema_version") == 2:
+        return True
+    scheduler = config["scheduler"]
+    response = orca_call(config, "automations", "show", scheduler["automation_id"])
+    enabled = nested_value(
+        response,
+        ("result", "automation", "enabled"),
+        ("result", "enabled"),
+        ("automation", "enabled"),
+        ("enabled",),
+    )
+    if not isinstance(enabled, bool):
+        raise WatcherError("Orca Automation status omitted enabled state")
+    return enabled
+
+
 def repository_for_issue(config: dict[str, Any], url: str) -> dict[str, Any]:
     repository = next((item for item in config["repositories"]
                        if url.startswith(f"https://github.com/{item['repository']}/issues/")), None)
@@ -1160,7 +1184,17 @@ def main() -> int:
                 result["started"] = work_available(config, ledger, run_id)
             else:
                 run_id = None
+                code = 0
                 while True:
+                    try:
+                        active_scheduler = scheduler_enabled(config)
+                    except WatcherError as exc:
+                        result = {"status": "scheduler-unavailable", "error": str(exc)}
+                        code = 2
+                        break
+                    if not active_scheduler:
+                        result = {"status": "scheduler-paused"}
+                        break
                     try:
                         run_id = run_id or ensure_orca_run(config, ledger)
                         value = {"detection": poll(config, ledger),

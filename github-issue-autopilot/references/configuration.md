@@ -1,6 +1,6 @@
 # Autopilot configuration
 
-For normal macOS/Orca setup, run the idempotent administrator from the installed Skill:
+For normal Orca setup, run the idempotent administrator from the installed Skill:
 
 ```sh
 python3 scripts/autopilot_admin.py install \
@@ -9,15 +9,15 @@ python3 scripts/autopilot_admin.py install \
   --allow-agent claude
 ```
 
-It creates the missing `agent-ready` GitHub label, a repository-specific state directory under `~/.local/state/github-issue-autopilot/`, a validated user LaunchAgent, and an untracked marker in the Git common directory. The LaunchAgent only ensures that Orca contains one visible `Issue Autopilot Coordinator` terminal. That terminal owns polling and supervised worker dispatch; no hidden Agent CLI fallback is permitted.
+It creates the missing `agent-ready` GitHub label, a repository-specific state directory under `~/.local/state/github-issue-autopilot/`, a native Orca Automation, and an untracked marker in the Git common directory. The GUI Automation checks every three minutes and invokes an Agent only when the visible `Issue Autopilot Coordinator` terminal needs recovery. That terminal owns polling and supervised worker dispatch; no hidden Agent CLI fallback is permitted.
 
 `--agent` is the repository default. Each `--allow-agent ID` adds an agent that an Issue may select with one `agent:ID` label. No agent label uses the default; exactly one label overrides it; conflicting, disallowed, or unavailable choices stop visibly at `needs-human`.
 
-Version 2 has this shape:
+Version 3 has this shape:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "state_db": "/Users/me/.local/state/github-issue-autopilot/state.sqlite3",
   "poll_interval_seconds": 180,
   "lease_timeout_seconds": 3000,
@@ -42,6 +42,17 @@ Version 2 has this shape:
     "default_agent": "codex",
     "allowed_agents": ["codex", "claude"],
     "setup": "run"
+  },
+  "scheduler": {
+    "backend": "orca-automation",
+    "automation_id": "generated-by-orca",
+    "name": "Issue Autopilot · owner/repo · stable-key",
+    "trigger": "*/3 * * * *",
+    "provider": "codex",
+    "workspace_mode": "existing",
+    "session_mode": "fresh",
+    "precheck_timeout_seconds": 60,
+    "missed_run_grace_minutes": 5
   }
 }
 ```
@@ -53,3 +64,5 @@ Version 2 has this shape:
 Workers run in visible `new-child` worktrees under the configured Orca project. They update comments at investigation, implementation, and verification checkpoints. A successful worker sends Orca `worker_done` and leaves one `AUTOPILOT_RESULT` in its final transcript. The watcher reads the preserved worker transcript and independently validates the worktree, branch, repair ledger, and base/head SHAs before marking it `ready-for-review`.
 
 Successful worktrees remain `in-review` until explicit acceptance. Accepting requires a clean, explicitly named target branch, merges without pushing, and closes the exact configured GitHub Issue only after the merge succeeds. If a repair was merged manually and its worktree is gone, acceptance continues only when Git proves the recorded reviewed head is already an ancestor of the checked-out target. The command reads the Issue back as closed before recording acceptance or cleaning the worktree; a closure failure remains retryable. Retrying with `--discard-worktree` removes only the exact recorded Orca worktree after its Dispatch is no longer live. Automated publication remains fixed to `never`.
+
+The scheduler fields are installer-owned safety settings. Pausing and resuming in Orca's GUI is supported; changing the trigger, provider, workspace, prompt, or precheck makes `doctor` report configuration drift. See [`orca-automation.md`](orca-automation.md) for migration, recovery, and pause behavior.
