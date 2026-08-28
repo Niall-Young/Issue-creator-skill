@@ -47,7 +47,7 @@ Version 2 has this shape:
 }
 ```
 
-`author` and `activate_after` are required. `@me` resolves through the authenticated GitHub CLI. The activation cutoff and advancing per-repository poll cursor prevent the first run from sweeping an old backlog or a later label edit from importing an older Issue. `repository_id` is optional but recommended to detect a renamed or transferred repository. Every configured intake label must be present.
+`author` and `activate_after` are required. `@me` resolves through the authenticated GitHub CLI. The activation cutoff is strictly exclusive, so Issues at or before installation never enter the queue. Later poll cursors are inclusive: the watcher safely replays the cursor's whole second, while immutable Issue node IDs make the overlap idempotent. This removes second-boundary gaps without sweeping an old backlog or importing an older Issue after a label edit. `repository_id` is optional but recommended to detect a renamed or transferred repository. Every configured intake label must be present.
 
 `max_concurrent_workers` accepts 1–3. Polling records every eligible Issue; the coordinator starts only the available number of Orca workers and fills a free slot on a later cycle. Orca is the source of truth for Task, Dispatch, agent terminal, worktree lineage, comments, and workspace status. SQLite stores immutable Issue node IDs, attempt history, and those Orca IDs for recovery.
 

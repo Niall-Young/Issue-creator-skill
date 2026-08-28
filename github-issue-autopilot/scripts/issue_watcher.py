@@ -784,13 +784,14 @@ def list_issues(repository: dict[str, Any], login: str, created_after: dt.dateti
         raise WatcherError(result.stderr.strip() or f"failed to list Issues for {slug}")
     values = json.loads(result.stdout)
     labels = set(repository.get("labels", []))
-    lower = created_after or repository["activate_after"]
+    activation = repository["activate_after"]
+    lower = created_after or activation
     eligible = []
     for issue in values:
         created = parse_time(issue["createdAt"])
         actual_labels = {item.get("name") for item in issue.get("labels", [])}
         if ((issue.get("author") or {}).get("login", "").lower() == author.lower()
-                and labels.issubset(actual_labels) and created > lower
+                and labels.issubset(actual_labels) and created > activation and created >= lower
                 and (created_through is None or created <= created_through)):
             issue["repository"] = slug
             eligible.append(issue)

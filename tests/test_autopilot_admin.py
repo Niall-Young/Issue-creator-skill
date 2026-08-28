@@ -82,6 +82,58 @@ class AutopilotAdminTests(unittest.TestCase):
         self.assertEqual(2, run.call_count)
         self.assertEqual("http2client=0", run.call_args.kwargs["env"]["GODEBUG"])
 
+    def doctor_result(self, *, plist: str = "matching", loaded: bool = True) -> dict:
+        with mock.patch.dict(os.environ, {
+            "GITHUB_ISSUE_AUTOPILOT_STATE_ROOT": str(self.root / "state"),
+            "GITHUB_ISSUE_AUTOPILOT_LAUNCH_AGENTS": str(self.root / "agents"),
+        }):
+            paths = ADMIN.build_paths("R_one")
+            config = Path(paths["config"])
+            config.parent.mkdir(parents=True)
+            config.write_text("{}\n", encoding="utf-8")
+            if plist != "missing":
+                data = plistlib.loads(ADMIN.build_plist(paths, config))
+                if plist == "mismatched":
+                    data["StartInterval"] = 60
+                Path(paths["plist"]).parent.mkdir(parents=True)
+                Path(paths["plist"]).write_bytes(plistlib.dumps(data))
+            launchctl = subprocess.CompletedProcess([], 0 if loaded else 113, "", "not loaded")
+            with mock.patch.object(ADMIN, "marker", return_value={
+                "repository_id": "R_one", "config": str(config), "repository": "owner/repo",
+            }), mock.patch.object(
+                ADMIN, "run_watcher", return_value={"ok": True, "gh": True, "repositories": []}
+            ), mock.patch.object(ADMIN, "command", return_value=launchctl):
+                return ADMIN.doctor(self.repo)
+
+    def test_doctor_passes_when_watcher_and_launchagent_are_healthy(self) -> None:
+        result = self.doctor_result()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["gh"])
+        self.assertEqual([], result["repositories"])
+        self.assertTrue(result["launch_agent"]["plist_exists"])
+        self.assertTrue(result["launch_agent"]["configuration_matches"])
+        self.assertTrue(result["launch_agent"]["loaded"])
+
+    def test_doctor_rejects_missing_plist_and_unloaded_agent(self) -> None:
+        result = self.doctor_result(plist="missing", loaded=False)
+        self.assertFalse(result["ok"])
+        self.assertIn("LaunchAgent plist is missing", result["launch_agent"]["errors"])
+        self.assertIn("LaunchAgent is not loaded", result["launch_agent"]["errors"])
+
+    def test_doctor_rejects_mismatched_plist_without_mutating_it(self) -> None:
+        result = self.doctor_result(plist="mismatched")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["launch_agent"]["loaded"])
+        self.assertFalse(result["launch_agent"]["configuration_matches"])
+        self.assertIn("does not match", result["launch_agent"]["errors"][0])
+
+    def test_doctor_cli_returns_nonzero_for_unhealthy_result(self) -> None:
+        with mock.patch.object(ADMIN.sys, "argv", ["autopilot_admin.py", "doctor",
+                                                   "--repo-path", str(self.repo)]), mock.patch.object(
+            ADMIN, "doctor", return_value={"ok": False, "launch_agent": {"loaded": False}}
+        ), mock.patch("builtins.print"):
+            self.assertEqual(2, ADMIN.main())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -91,6 +91,7 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 - 三个 Skill 的 `agents/openai.yaml` 提供 OpenAI 兼容 Agent 的界面配置并允许自动发现；技能发现本身不构成修改代码或远程写入授权。
 - `github-issue-repair/scripts/run_state.py` 使用 Python 标准库，在仓库 Git 公共目录中维护运行账本，无需额外依赖。
 - `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、检查、停用、验收或重做仓库循环；`issue_watcher.py` 负责新 Issue 游标、最多三任务领取、Orca 调度、attempt 账本和 Git 证据回读，远程发布策略固定为 `never`。
+- 管理员级 `doctor` 同时检查 watcher、LaunchAgent plist 配置和 `launchctl` 加载状态，全程只读并返回可诊断字段。轮询会安全重读游标所在的整秒，再由不可变 Issue node ID 去重；安装激活边界仍采用严格排除，旧 Issue 不会因此进入队列。
 
 ### 项目结构
 
@@ -225,6 +226,7 @@ In any macOS GitHub checkout, ask the Agent to “build an Issue loop.” Autopi
 - Each Skill's `agents/openai.yaml` provides OpenAI-compatible UI metadata and allows automatic discovery. Skill discovery is not authorization to edit code or write remotely.
 - `github-issue-repair/scripts/run_state.py` uses only the Python standard library and stores its ledger under the repository's common Git directory.
 - `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, checks, stops, accepts, or retries a repository loop. `issue_watcher.py` owns the new-Issue cursor, three-slot claims, Orca dispatch, attempt history, and Git evidence readback; remote publication remains fixed to `never`.
+- Administrator-level `doctor` checks the watcher, LaunchAgent plist configuration, and `launchctl` load state without mutating them, returning diagnostic fields for each layer. Polling safely replays the cursor's whole second and relies on immutable Issue node IDs for deduplication, while the installation activation boundary remains strictly exclusive so older Issues stay out of the queue.
 
 ### Project Structure
 

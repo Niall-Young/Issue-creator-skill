@@ -166,6 +166,38 @@ class IssueWatcherTests(unittest.TestCase):
             eligible = WATCHER.list_issues(repository, "owner")
         self.assertEqual(["new"], [issue["id"] for issue in eligible])
 
+    def test_issue_filter_replays_cursor_second_without_crossing_activation_cutoff(self) -> None:
+        repository = self.config()["repositories"][0]
+        repository["labels"] = ["agent-ready"]
+        boundary = dt.datetime(2026, 8, 27, 1, 0, 1, tzinfo=dt.timezone.utc)
+        values = [
+            {**self.issue("boundary", 1), "createdAt": "2026-08-27T01:00:01Z",
+             "author": {"login": "owner"}, "labels": [{"name": "agent-ready"}]},
+            {**self.issue("activation", 2), "createdAt": "2026-08-27T00:00:00Z",
+             "author": {"login": "owner"}, "labels": [{"name": "agent-ready"}]},
+        ]
+        metadata = {"id": "R_1", "nameWithOwner": "owner/repo",
+                    "isArchived": False, "hasIssuesEnabled": True}
+        calls = [
+            subprocess.CompletedProcess([], 0, json.dumps(metadata), ""),
+            subprocess.CompletedProcess([], 0, json.dumps(values), ""),
+        ]
+        with mock.patch.object(WATCHER, "command", side_effect=calls):
+            eligible = WATCHER.list_issues(repository, "owner", created_after=boundary)
+        self.assertEqual(["boundary"], [issue["id"] for issue in eligible])
+
+    def test_overlapping_poll_window_deduplicates_replayed_node_id(self) -> None:
+        config, ledger = self.config(), self.ledger()
+        issue = {**self.issue(), "author": {"login": "owner"}, "labels": []}
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[issue]
+        ):
+            first = WATCHER.poll(config, ledger)
+            second = WATCHER.poll(config, ledger)
+        self.assertEqual(1, first["enqueued"])
+        self.assertEqual(0, second["enqueued"])
+        self.assertEqual(1, len(ledger.snapshot()["issues"]))
+
     def test_claim_many_starts_three_and_leaves_the_fourth_queued(self) -> None:
         ledger = self.ledger()
         for number in range(1, 5):
