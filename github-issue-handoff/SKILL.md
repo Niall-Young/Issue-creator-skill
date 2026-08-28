@@ -13,7 +13,7 @@ Create an Issue that a new agent can execute using only the Issue and the reposi
 - If the skill was selected implicitly, require clear Issue-creation intent. A GitHub link by itself outside an explicit skill invocation is not authorization.
 - If the user asks for a draft or preview, do not create the Issue.
 - One request containing multiple independently deliverable tasks requires split confirmation before creating multiple Issues.
-- Do not add or create labels, assignees, milestones, or projects unless the user explicitly requests them.
+- When the matching local checkout's Git common directory contains `github-issue-autopilot.json`, read that marker and add its configured `agent-ready` label by default. An explicit request such as “不要自动处理” opts out for that Issue. Outside a configured Autopilot checkout, do not add or create labels, assignees, milestones, or projects unless the user explicitly requests them.
 
 ## Prepare the task
 
@@ -56,6 +56,6 @@ If a critical field cannot be derived, ask one focused question at a time. Do no
 
 For a ready single task, create the Issue without an additional preview step. Pass the exact Markdown body through stdin or a safely created temporary file to `gh issue create`; never interpolate Issue content into executable shell syntax.
 
-Treat creation as successful only after obtaining the Issue URL and reading the same remote Issue back with `gh issue view`. Verify the repository, title, and body are complete, then return a concise result with the final title and clickable URL.
+Treat creation as successful only after obtaining the Issue URL and reading the same remote Issue back with `gh issue view`. Verify the repository, title, body, and expected Autopilot label are complete, then return a concise result with the final title and clickable URL. If a configured default label cannot be applied, do not imply that the Issue entered the automatic queue.
 
 If creation fails without a reliable receipt, search recent Issues by the proposed title and current author before retrying. If an exact recent match exists, read it back and use that URL. Otherwise report the failure and do not blindly retry.

@@ -1,6 +1,8 @@
 # Run automatically with launchd
 
-Use a user LaunchAgent to run one detection-and-execution tick every three minutes. First run `doctor` and `once` manually with the same absolute Python, script, and configuration paths.
+The preferred setup is `python3 scripts/autopilot_admin.py install --repo-path /absolute/repository/root`. It generates, validates, loads, and kickstarts a repository-specific user LaunchAgent. The manual template below is for unsupported executors or debugging.
+
+Each LaunchAgent runs one detection-and-execution tick every three minutes. `launchd` does not overlap the same job, while the SQLite PID/lease gate also prevents a manual second watcher from dispatching duplicate work.
 
 Save the following as `~/Library/LaunchAgents/com.example.github-issue-autopilot.plist`, replacing every example path. Keep the configuration and SQLite state database outside managed repositories.
 

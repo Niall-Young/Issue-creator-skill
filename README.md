@@ -23,11 +23,11 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 
 - `github-issue-handoff`：校验仓库、检索重复项、套用 Feature / Bug / Refactor / Research 模板，通过可执行性门禁后创建并回读中文 Issue。
 - `github-issue-repair`：把 Issue 归一化为工作包，识别依赖、重复、同根因与冲突关系；仓库 URL 默认只做只读分诊。
-- `github-issue-autopilot`：轮询允许的仓库，按作者、创建时间和可选标签筛选 Issue，用 SQLite WAL 原子领取任务，并调用 `$github-issue-repair`。
+- `github-issue-autopilot`：一句话为当前仓库安装本地循环，只领取启用后由当前用户新建且带 `agent-ready` 的 open Issue，并调用 `$github-issue-repair`。
 - 修复 worker 使用独立 worktree，不修改用户正在使用的工作树；MVP 串行执行，成熟批次最多并发 3 个低交互风险工作包。
 - 独立 reviewer 核对验收标准、验证证据、范围漂移和测试弱化。
-- 确定性账本记录 base/head SHA、计划、审批、状态迁移和远程回执，支持中断恢复与幂等发布。
-- 交互模式仍由用户批准本地修改；Autopilot 可把符合可信本地策略的 Issue 视为一次低/中风险本地修复授权。发布 draft PR 仍需另行授权；不自动合并、关闭 Issue、评论、打标签、发布或部署。
+- 双层账本以 Issue node ID 防止重复派单，并为每次 attempt 记录 PID、租约、worktree、分支、base/head SHA、日志和结果。
+- 交互模式仍由用户批准本地修改；Autopilot 可把符合可信本地策略的 Issue 视为一次低/中风险本地修复授权。安装器只负责缺失的仓库触发标签；修复执行不 push、不建 PR，也不写 Issue、发布或部署。
 
 ### 快速开始
 
@@ -63,7 +63,7 @@ cp -R github-issue-workflow/github-issue-autopilot ~/.claude/skills/github-issue
 $github-issue-handoff <GitHub URL>
 $github-issue-repair <GitHub Issue URL>
 $github-issue-repair <GitHub Repository URL>
-python3 github-issue-autopilot/scripts/issue_watcher.py once --config /absolute/path/autopilot.json
+python3 github-issue-autopilot/scripts/autopilot_admin.py install --repo-path /absolute/repository/root
 ```
 
 ### 使用方法
@@ -84,13 +84,13 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 预期结果：技能先只读分析并展示工作包、base SHA、风险、预算和验证方案。用户批准后才允许本地修改；用户检查 diff 与证据并授权发布后，才允许 push 和创建 draft PR。仅提供仓库 URL 时，技能只输出有限候选批次，不会自动修复所有 Issue。
 
-自动执行新 Issue：按 [`github-issue-autopilot/references/configuration.md`](github-issue-autopilot/references/configuration.md) 创建本地 JSON 配置，必须设置仓库白名单、作者、`activate_after`、本地仓库路径和 fresh-session executor。先运行 `doctor`，再用 `once` 试跑；确认后按 [`launchd.md`](github-issue-autopilot/references/launchd.md) 每三分钟执行一次。已有历史 Issue 不会越过 `activate_after` 自动入队；Issue 编辑也不会重复触发，需用 `retry` 明确重跑。
+在任意 macOS GitHub 项目中说“构建 Issue 循环检查机制”，Autopilot 会运行确定性安装器，创建缺失的 `agent-ready` 标签、仓库独立配置与 LaunchAgent。每三分钟只处理一个任务；`open` 只决定首次入队，之后即使 Issue 一直 open，`running`、`ready-for-review` 或人工处理状态也不会再次派单。满意时明确 `accept` 到当前干净的目标分支；不满意时明确 `retry --discard-worktree`，系统只舍弃账本记录的旧 `repair/` worktree 和分支，再建立新 attempt。详见 [`configuration.md`](github-issue-autopilot/references/configuration.md)。
 
 ### 配置
 
 - 三个 Skill 的 `agents/openai.yaml` 提供 OpenAI 兼容 Agent 的界面配置并允许自动发现；技能发现本身不构成修改代码或远程写入授权。
 - `github-issue-repair/scripts/run_state.py` 使用 Python 标准库，在仓库 Git 公共目录中维护运行账本，无需额外依赖。
-- `github-issue-autopilot/scripts/issue_watcher.py` 仅使用 Python 标准库和 `gh`，把调度状态与日志保存在受管仓库之外；默认串行，远程发布策略固定为 `never`。
+- `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、检查、停用、验收或重做仓库循环；`issue_watcher.py` 负责新 Issue 游标、串行领取、attempt 账本和 Git 证据回读，远程发布策略固定为 `never`。
 
 ### 项目结构
 
@@ -104,7 +104,9 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 │   ├── SKILL.md
 │   ├── references/configuration.md
 │   ├── references/launchd.md
-│   └── scripts/issue_watcher.py
+│   └── scripts/
+│       ├── autopilot_admin.py     # 一句话安装与生命周期命令
+│       └── issue_watcher.py       # 轮询、attempt 与防重复调度
 ├── github-issue-repair/           # Issue 分诊与修复 Skill
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
@@ -132,7 +134,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 
 ### 成熟度
 
-当前已提供单机 macOS 轮询、SQLite 幂等领取和 fresh-process 执行。默认一次只运行一个 Issue，且只自动授权低/中风险的本地实施与验证。自动 draft PR、多机调度和有限并发仍需真实仓库验收数据后再启用。普通 macOS 用户进程属于“降低风险的隔离”，不是保护全部本地秘密的强安全边界；处理不可信仓库时应使用低权限账户或更强沙箱。完整门禁和扩展指标见 [ROADMAP.md](ROADMAP.md#中文)。
+当前已提供单机 macOS 一键安装、SQLite 幂等领取、独立 attempt worktree 和 fresh-process 执行。默认一次只运行一个 Issue；成功后保留本地分支等待人工接受，过期或失败任务停下而不盲目重派。自动 draft PR、多机调度和有限并发仍需真实仓库验收数据后再启用。普通 macOS 用户进程属于“降低风险的隔离”，不是保护全部本地秘密的强安全边界；处理不可信仓库时应使用低权限账户或更强沙箱。完整门禁和扩展指标见 [ROADMAP.md](ROADMAP.md#中文)。
 
 ### 许可证
 
@@ -155,11 +157,11 @@ When upgrading, remove the installed `github-issue-creator/` copy before install
 
 - `github-issue-handoff` validates repositories, detects duplicates, applies Feature / Bug / Refactor / Research templates, and creates a Chinese Issue only after its executability gate passes.
 - `github-issue-repair` normalizes Issues into work packages and models dependencies, duplicates, shared root causes, and conflicts; repository URLs default to read-only triage.
-- `github-issue-autopilot` polls allowlisted repositories, filters by author, creation cutoff, and optional labels, atomically claims work in a SQLite WAL ledger, and invokes `$github-issue-repair`.
+- `github-issue-autopilot` installs a local loop with one request, claims only newly created open Issues by the current user carrying `agent-ready`, and invokes `$github-issue-repair`.
 - Repair workers use isolated worktrees and never edit the user's active tree. The MVP is sequential; a mature batch may run at most three low-interaction-risk packages concurrently.
 - An independent reviewer checks acceptance criteria, verification evidence, scope drift, and weakened tests.
-- A deterministic ledger records base/head SHAs, plans, approvals, state transitions, and remote receipts for recovery and idempotent publication.
-- Interactive repairs still require user approval. Autopilot may treat an Issue matching trusted local policy as approval for one low/medium-risk local repair. Draft-PR publication remains separately authorized; the workflow never auto-merges, closes, comments, labels, releases, or deploys.
+- A two-level ledger deduplicates immutable Issue node IDs and records every attempt's PID, lease, worktree, branch, base/head SHAs, log, and outcome.
+- Interactive repairs still require user approval. Autopilot may treat an Issue matching trusted local policy as approval for one low/medium-risk local repair. The installer only provisions a missing repository trigger label; repair runs never push, create PRs, write Issues, release, or deploy.
 
 ### Quick Start
 
@@ -195,7 +197,7 @@ Create and repair one-off tasks in an Agent session; run the dispatcher locally 
 $github-issue-handoff <GitHub URL>
 $github-issue-repair <GitHub Issue URL>
 $github-issue-repair <GitHub Repository URL>
-python3 github-issue-autopilot/scripts/issue_watcher.py once --config /absolute/path/autopilot.json
+python3 github-issue-autopilot/scripts/autopilot_admin.py install --repo-path /absolute/repository/root
 ```
 
 ### Usage
@@ -216,13 +218,13 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 Expected result: the skill first performs read-only analysis and presents the package, base SHA, risk, budget, and verification plan. It may edit locally only after scope approval, and may push and create a draft PR only after the user reviews the diff and evidence and authorizes publication. With only a repository URL, it proposes a capped candidate batch instead of repairing every Issue.
 
-To execute new Issues automatically, create a local JSON policy from [`configuration.md`](github-issue-autopilot/references/configuration.md). It must define the repository allowlist, author, `activate_after`, local clone, and fresh-session executor. Run `doctor`, pilot with `once`, then schedule it every three minutes using [`launchd.md`](github-issue-autopilot/references/launchd.md). Historical Issues before the cutoff are not imported, edits do not retrigger completed work, and reruns require the explicit `retry` command.
+In any macOS GitHub checkout, ask the Agent to “build an Issue loop.” Autopilot runs the deterministic installer, creates a missing `agent-ready` label, and writes repository-isolated configuration plus a LaunchAgent. It runs at most one worker every three minutes. `open` is only an intake condition: a running, review-ready, or human-stopped attempt is never dispatched again merely because the Issue remains open. Explicitly `accept` a satisfactory branch into a named clean target branch, or use `retry --discard-worktree` to remove only the recorded old `repair/` worktree and branch before a new attempt. See [`configuration.md`](github-issue-autopilot/references/configuration.md).
 
 ### Configuration
 
 - Each Skill's `agents/openai.yaml` provides OpenAI-compatible UI metadata and allows automatic discovery. Skill discovery is not authorization to edit code or write remotely.
 - `github-issue-repair/scripts/run_state.py` uses only the Python standard library and stores its ledger under the repository's common Git directory.
-- `github-issue-autopilot/scripts/issue_watcher.py` uses only the Python standard library plus `gh`, and stores dispatcher state and logs outside managed repositories. It is sequential by default and hard-codes remote publication to `never`.
+- `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, checks, stops, accepts, or retries a repository loop. `issue_watcher.py` owns the new-Issue cursor, sequential claims, attempt history, and Git evidence readback; remote publication remains fixed to `never`.
 
 ### Project Structure
 
@@ -236,7 +238,9 @@ To execute new Issues automatically, create a local JSON policy from [`configura
 │   ├── SKILL.md
 │   ├── references/configuration.md
 │   ├── references/launchd.md
-│   └── scripts/issue_watcher.py
+│   └── scripts/
+│       ├── autopilot_admin.py     # One-request installation and lifecycle commands
+│       └── issue_watcher.py       # Polling, attempts, and duplicate prevention
 ├── github-issue-repair/           # Issue triage and repair Skill
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
@@ -264,7 +268,7 @@ Real GitHub mutations still require CLI readback:
 
 ### Maturity
 
-Single-machine macOS polling, SQLite idempotent claims, and fresh-process execution are now available. The default is one Issue at a time, with automatic authorization limited to low/medium-risk local implementation and verification. Automatic draft PRs, multi-runner scheduling, and bounded concurrency still require acceptance evidence from real repositories. A normal macOS user process provides reduced isolation, not a strong boundary protecting all local secrets; use a low-privilege account or stronger sandbox for hostile repositories. See [ROADMAP.md](ROADMAP.md#english) for gates and expansion metrics.
+Single-machine macOS installation, SQLite idempotent claims, isolated attempt worktrees, and fresh-process execution are now available. The default is one Issue at a time; successful branches wait for human acceptance, while stale or failed attempts stop instead of relaunching blindly. Automatic draft PRs, multi-runner scheduling, and bounded concurrency still require acceptance evidence from real repositories. A normal macOS user process provides reduced isolation, not a strong boundary protecting all local secrets; use a low-privilege account or stronger sandbox for hostile repositories. See [ROADMAP.md](ROADMAP.md#english) for gates and expansion metrics.
 
 ### License
 

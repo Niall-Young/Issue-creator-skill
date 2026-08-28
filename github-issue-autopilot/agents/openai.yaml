@@ -1,7 +1,7 @@
 interface:
   display_name: "GitHub Issue Autopilot"
-  short_description: "自动发现 Issue 并在干净 Agent 上下文中执行"
-  default_prompt: "Use $github-issue-autopilot to configure automatic Issue discovery and clean-context repair execution."
+  short_description: "构建防重复的 Issue 自动修复循环"
+  default_prompt: "Use $github-issue-autopilot to build a local Issue repair loop for this repository."
 
 policy:
   allow_implicit_invocation: true

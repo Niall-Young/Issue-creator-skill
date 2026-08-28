@@ -1,6 +1,14 @@
 # Autopilot configuration
 
-Use an absolute path for the JSON configuration and keep it outside the repository when it contains machine-specific paths. Version 1 has this shape:
+For normal macOS/Codex setup, run the idempotent administrator from the installed Skill:
+
+```sh
+python3 scripts/autopilot_admin.py install --repo-path /absolute/repository/root
+```
+
+It creates the missing `agent-ready` GitHub label, a repository-specific state directory under `~/.local/state/github-issue-autopilot/`, a validated user LaunchAgent, and an untracked marker in the Git common directory. Use the manual JSON form below for other executors or platforms.
+
+Use an absolute path for manual JSON configuration and keep it outside the repository. Version 1 has this shape:
 
 ```json
 {
@@ -22,7 +30,7 @@ Use an absolute path for the JSON configuration and keep it outside the reposito
       "repo_path": "/absolute/path/to/local/clone",
       "author": "@me",
       "activate_after": "2026-08-27T00:00:00Z",
-      "labels": []
+      "labels": ["agent-ready"]
     }
   ],
   "executor": {
@@ -43,7 +51,7 @@ Use an absolute path for the JSON configuration and keep it outside the reposito
 }
 ```
 
-`author` and `activate_after` are required. `@me` is resolved through the authenticated GitHub CLI. The activation cutoff prevents the first run from sweeping an old backlog. `repository_id` is optional but recommended to detect a renamed or transferred repository. Every configured label must be present. Use a dedicated label when not every owner-authored Issue should start work.
+`author` and `activate_after` are required. `@me` is resolved through the authenticated GitHub CLI. The activation cutoff and advancing per-repository poll cursor prevent the first run from sweeping an old backlog or a later label edit from importing an older Issue. `repository_id` is optional but recommended to detect a renamed or transferred repository. Every configured label must be present; the administrator defaults to `agent-ready`.
 
 Supported `argv` placeholders are `{repository}`, `{repo_path}`, `{issue_url}`, and `{issue_number}`. The generated prompt is sent on stdin; Issue title or body never becomes an argument. The executable must be a fresh-session command such as Codex `exec --ephemeral` or Claude Code with session persistence disabled.
 
@@ -51,6 +59,8 @@ Use an absolute executor path when running under `launchd`, whose default `PATH`
 
 `lease_timeout_seconds` must be greater than `executor.timeout_seconds`. `publication` currently accepts only `never`; automatic draft-PR publication should be added only with a separate credential and receipt design. The state database and logs are local runtime artifacts, not repository files.
 
-The watcher stores immutable GitHub Issue node IDs in a SQLite WAL ledger. Repeated polls and body edits do not enqueue another automatic run. Use the explicit `retry` command for another attempt. A stale lease can be reclaimed only after its process is gone and the attempt budget permits it.
+The watcher stores immutable GitHub Issue node IDs and separate attempt rows in a SQLite WAL ledger. `open` matters only at initial discovery and pre-execution revalidation. Repeated polls, body edits, later label changes, reopened Issues, running workers, and work waiting for review do not enqueue another run. A dead stale worker stops at `needs-human`; use an explicit retry for another numbered attempt.
 
-The generated child prompt identifies the verified eligibility policy, invokes `$github-issue-repair` with the canonical Issue URL, forbids remote writes, and requires an `AUTOPILOT_RESULT` receipt. The repair agent still validates the repository and Issue with `gh` and stops when the task exceeds policy. On an ordinary macOS user account this is reduced isolation: a fresh process and Agent sandbox do not by themselves protect every unrelated local secret. Use a dedicated low-privilege account or stronger sandbox for hostile repositories.
+Successful attempts remain `ready-for-review` with their isolated worktree and branch. Accepting one requires a clean, explicitly named local target branch and never pushes. Rejecting one with `retry --discard-worktree` removes only the exact recorded worktree and `repair/` branch, records the old attempt as rejected, and queues a new attempt number.
+
+The generated child prompt identifies the verified eligibility policy, invokes `$github-issue-repair` with the canonical Issue URL, forbids remote writes, and requires a structured `AUTOPILOT_RESULT` containing the run ID, worktree, branch, and base/head SHAs. The watcher validates those artifacts with Git before declaring the attempt ready for review. On an ordinary macOS user account this is reduced isolation: a fresh process and Agent sandbox do not by themselves protect every unrelated local secret. Use a dedicated low-privilege account or stronger sandbox for hostile repositories.

@@ -26,7 +26,7 @@
 - 协调器负责确定性的状态、依赖、预算、审批和恢复；Agent 只承担有边界的规划、实施与审查角色。
 - worker 使用隔离 worktree，不接触远程写凭据，也不修改用户正在使用的工作树。
 - 自动化可以准备证据和 draft PR，但 MVP 不自动合并、关闭 Issue、评论、打标签、发布或部署。
-- 新部署必须设置 `activate_after`，避免首次运行扫入历史 backlog；自动任务以 GitHub Issue node ID 幂等识别，Issue 编辑不会自动重跑。
+- 新部署必须设置 `activate_after`，并在成功轮询后推进游标；自动任务以 GitHub Issue node ID 幂等识别，Issue 编辑、后补标签、重新打开或保持 open 都不会自动重跑。
 
 ### 分阶段计划
 
@@ -74,8 +74,9 @@
 
 已完成的单机基础：
 
-- `github-issue-autopilot` 用 `gh` 只读轮询允许仓库，按作者、`activate_after` 与可选标签筛选。
-- SQLite WAL 账本用 node ID 去重、事务领取与租约恢复；每次执行启动 fresh Agent 进程，并在执行前复核 Issue 仍然符合策略。
+- `github-issue-autopilot` 可为当前 macOS 仓库安装独立 LaunchAgent，用 `gh` 只读轮询并按作者、新建游标与 `agent-ready` 标签筛选。
+- SQLite WAL 账本用 node ID 去重并为每次 worktree 保存独立 attempt；事务领取与 PID/租约阻止重叠 worker，过期 worker 停在 `needs-human` 而非盲目重派。
+- 成功 attempt 以 Git 回读验证 worktree、`repair/` 分支和 base/head SHA 后进入 `ready-for-review`；人工可明确本地合并，或舍弃精确记录的 worktree 后创建新 attempt。
 - 符合策略的 Issue 只预授权一个低/中风险本地工作包；远程发布固定为 `never`，merge 始终由人完成。
 - `launchd` 可定时运行 `once`；无有效 `AUTOPILOT_RESULT` 回执不得判定成功。
 
@@ -136,7 +137,7 @@ The repository now includes all three Skills, the work-package contract, approva
 - A deterministic coordinator owns state, dependencies, budgets, approvals, and recovery. Agents perform bounded planning, implementation, and review roles.
 - Workers use isolated worktrees, receive no remote-write credentials, and never modify the user's active working tree.
 - Automation may prepare evidence and draft PRs, but the MVP never merges, closes Issues, comments, labels, releases, or deploys automatically.
-- New deployments require `activate_after` so the first run cannot sweep an old backlog. Automatic jobs are idempotent by immutable GitHub Issue node ID; Issue edits do not retrigger work.
+- New deployments require `activate_after` and advance a cursor after each successful poll. Automatic jobs are idempotent by immutable GitHub Issue node ID; edits, later labels, reopened Issues, or remaining open do not retrigger work.
 
 ### Phased Plan
 
@@ -182,8 +183,9 @@ Exit criterion: remote actions are traceable and resumable without duplicate PRs
 
 Implemented single-machine foundation:
 
-- `github-issue-autopilot` performs read-only `gh` polling on allowlisted repositories and filters by author, `activate_after`, and optional labels.
-- A SQLite WAL ledger deduplicates by node ID, claims transactionally, and recovers stale leases. Every run starts a fresh Agent process and revalidates eligibility before execution.
+- `github-issue-autopilot` can install a repository-specific macOS LaunchAgent, performs read-only `gh` polling, and filters by author, new-Issue cursor, and the `agent-ready` label.
+- A SQLite WAL ledger deduplicates by node ID and records each worktree as a separate attempt. Transactional claims plus PID/lease checks block overlapping workers; stale workers stop at `needs-human` instead of relaunching blindly.
+- A successful attempt becomes `ready-for-review` only after Git validates its worktree, `repair/` branch, and base/head SHAs. A human can explicitly merge it locally or discard the exact worktree before creating another attempt.
 - An eligible Issue pre-authorizes only one low/medium-risk local work package. Remote publication is fixed to `never`, and merge remains human-only.
 - `launchd` can schedule `once`; a run without a valid `AUTOPILOT_RESULT` receipt is never reported as success.
 
