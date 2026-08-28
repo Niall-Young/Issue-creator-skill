@@ -39,8 +39,6 @@ Use an absolute path for manual JSON configuration and keep it outside the repos
       "/Users/me/.local/bin/codex",
       "exec",
       "--ephemeral",
-      "--sandbox",
-      "workspace-write",
       "--approve-for-me",
       "--skip-git-repo-check",
       "-C",
@@ -55,7 +53,7 @@ Use an absolute path for manual JSON configuration and keep it outside the repos
 
 Supported `argv` placeholders are `{repository}`, `{repo_path}`, `{issue_url}`, and `{issue_number}`. The generated prompt is sent on stdin; Issue title or body never becomes an argument. The executable must be a fresh-session command such as Codex `exec --ephemeral` or Claude Code with session persistence disabled.
 
-Use an absolute executor path when running under `launchd`, whose default `PATH` is intentionally small. The Codex example uses `--approve-for-me` so an unattended run can pass ordinary workspace-write approvals through automatic review; it does not authorize the remote operations forbidden by the Autopilot policy.
+Use an absolute executor path when running under `launchd`, whose default `PATH` is intentionally small. The Codex example uses `--approve-for-me`, which selects the workspace-write sandbox and routes ordinary approval requests through automatic review. Do not add a separate `--sandbox` argument: Codex rejects that option when combined with `--approve-for-me`. Automatic approval does not authorize the remote operations forbidden by the Autopilot policy.
 
 `lease_timeout_seconds` must be greater than `executor.timeout_seconds`. `publication` currently accepts only `never`; automatic draft-PR publication should be added only with a separate credential and receipt design. The state database and logs are local runtime artifacts, not repository files.
 

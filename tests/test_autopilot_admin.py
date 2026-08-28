@@ -68,7 +68,11 @@ class AutopilotAdminTests(unittest.TestCase):
         )
         self.assertEqual(["agent-ready"], value["repositories"][0]["labels"])
         self.assertEqual("never", value["policy"]["publication"])
-        self.assertIn("--ephemeral", value["executor"]["argv"])
+        self.assertEqual([
+            "/bin/codex", "exec", "--ephemeral", "--approve-for-me",
+            "--skip-git-repo-check", "-C", "{repo_path}", "-",
+        ], value["executor"]["argv"])
+        self.assertNotIn("--sandbox", value["executor"]["argv"])
 
 
 if __name__ == "__main__":

@@ -111,7 +111,7 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, codex: str, l
             "repo_path": str(repo), "author": login, "activate_after": activated_at, "labels": [label],
         }],
         "executor": {"timeout_seconds": 2700, "argv": [
-            codex, "exec", "--ephemeral", "--sandbox", "workspace-write", "--approve-for-me",
+            codex, "exec", "--ephemeral", "--approve-for-me",
             "--skip-git-repo-check", "-C", "{repo_path}", "-",
         ]},
     }
