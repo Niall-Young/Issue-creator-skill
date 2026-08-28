@@ -175,7 +175,7 @@ class IssueWatcherTests(unittest.TestCase):
         eligible = dict(issue, author={"login": "owner"}, labels=[])
         with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
             WATCHER, "list_issues", return_value=[eligible]
-        ), mock.patch.object(
+        ) as list_issues, mock.patch.object(
             WATCHER, "create_orca_task", return_value="task-1"
         ), mock.patch.object(WATCHER, "orca_call", side_effect=[
             {"ok": True, "result": {"dispatch": {"id": "dispatch-1"}, "worktree": {
@@ -188,6 +188,8 @@ class IssueWatcherTests(unittest.TestCase):
         attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
         self.assertEqual("codex", attempt["agent_id"])
         self.assertEqual("dispatch-1", attempt["orca_dispatch_id"])
+        self.assertEqual(dt.datetime.min.replace(tzinfo=dt.timezone.utc),
+                         list_issues.call_args.kwargs["created_after"])
 
     def test_unavailable_agent_still_creates_visible_blocked_worktree(self) -> None:
         config = self.config()

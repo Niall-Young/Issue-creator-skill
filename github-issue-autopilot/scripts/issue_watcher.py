@@ -831,7 +831,10 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
     repair_run_id = str(uuid.uuid4())
     run["run_id"] = repair_run_id
     try:
-        current = {item["id"]: item for item in list_issues(repository, github_login())}
+        historical_cutoff = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        current = {item["id"]: item for item in list_issues(
+            repository, github_login(), created_after=historical_cutoff
+        )}
         issue = current.get(run["node_id"])
         if issue is None:
             ledger.finish(run["node_id"], attempt, "blocked", summary="Issue is no longer open or eligible",
