@@ -100,7 +100,8 @@ class IssueWatcherTests(unittest.TestCase):
         with mock.patch.object(WATCHER.sys, "argv", [
             "issue_watcher.py", "run", "--config", str(self.root / "config.json")
         ]), mock.patch.object(WATCHER, "load_config", return_value=config), mock.patch.object(
-            WATCHER, "scheduler_enabled", return_value=False
+            WATCHER, "runtime_workspace_error", return_value=None
+        ), mock.patch.object(WATCHER, "scheduler_enabled", return_value=False
         ), mock.patch("builtins.print") as output:
             self.assertEqual(0, WATCHER.main())
         self.assertIn("scheduler-paused", output.call_args.args[0])
@@ -112,10 +113,54 @@ class IssueWatcherTests(unittest.TestCase):
         with mock.patch.object(WATCHER.sys, "argv", [
             "issue_watcher.py", "run", "--config", str(self.root / "config.json")
         ]), mock.patch.object(WATCHER, "load_config", return_value=config), mock.patch.object(
+            WATCHER, "runtime_workspace_error", return_value=None
+        ), mock.patch.object(
             WATCHER, "scheduler_enabled", side_effect=WATCHER.WatcherError("Automation missing")
         ), mock.patch("builtins.print") as output:
             self.assertEqual(2, WATCHER.main())
         self.assertIn("scheduler-unavailable", output.call_args.args[0])
+
+    def test_runtime_workspace_loss_pauses_native_automation(self) -> None:
+        config = self.config()
+        config["schema_version"] = 3
+        config["scheduler"] = {"backend": "orca-automation", "automation_id": "auto-1"}
+        config["repositories"][0]["repo_path"] = self.root / "missing"
+        self.assertIn("missing", WATCHER.runtime_workspace_error(config))
+        with mock.patch.object(WATCHER, "orca_call", return_value={"result": {}}) as call:
+            result = WATCHER.pause_for_missing_workspace(config, "missing")
+        self.assertEqual("paused-missing-workspace", result["status"])
+        call.assert_called_once_with(config, "automations", "edit", "auto-1", "--disabled")
+
+    def test_explicit_discard_settles_missing_orca_worker_and_worktree(self) -> None:
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-1", orca_dispatch_id="dispatch-missing",
+            orca_worktree_id=f"repo::{self.root / 'missing-worktree'}",
+            worktree_path=str(self.root / "missing-worktree"), branch="owner/issue-1-attempt-1",
+        )
+        with mock.patch.object(WATCHER, "json_command",
+                               side_effect=WATCHER.WatcherError("dispatch not found")):
+            result = ledger.discard(self.issue()["url"], self.repo, "/bin/orca")
+        self.assertEqual("discarded", result["status"])
+        self.assertEqual("discarded", ledger.snapshot()["issues"][0]["status"])
+
+    def test_explicit_discard_refuses_live_orca_worker(self) -> None:
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-1", orca_dispatch_id="dispatch-live",
+            orca_worktree_id=f"repo::{self.root / 'live-worktree'}",
+            worktree_path=str(self.root / "live-worktree"), branch="owner/issue-1-attempt-1",
+        )
+        with mock.patch.object(WATCHER, "json_command", return_value={"status": "running"}), self.assertRaisesRegex(
+            WATCHER.WatcherError, "still running"
+        ):
+            ledger.discard(self.issue()["url"], self.repo, "/bin/orca")
 
     def repair_evidence(self, worktree: Path, branch: str, base: str, head: str) -> dict:
         run_id = str(uuid.uuid4())

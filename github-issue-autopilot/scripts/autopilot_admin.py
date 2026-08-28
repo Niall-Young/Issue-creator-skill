@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import json
 import os
 import plistlib
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -113,6 +115,109 @@ def build_paths(repository_id: str) -> dict[str, Path | str]:
         "plist": launch_agents_dir() / f"{label}.plist",
         "legacy_plist_backup": root / "legacy-launchd.plist",
     }
+
+
+def read_config(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AdminError(f"cannot read Autopilot configuration: {exc}") from exc
+    if not isinstance(value, dict):
+        raise AdminError("Autopilot configuration must be a JSON object")
+    return value
+
+
+def installed_configs() -> list[tuple[Path, dict[str, Any]]]:
+    root = state_root()
+    values: list[tuple[Path, dict[str, Any]]] = []
+    if not root.is_dir():
+        return values
+    for path in sorted(root.glob("*/autopilot.json")):
+        if path.parent.name == "archives":
+            continue
+        try:
+            config = read_config(path)
+        except AdminError:
+            continue
+        repositories = config.get("repositories")
+        if isinstance(repositories, list) and len(repositories) == 1:
+            values.append((path, config))
+    return values
+
+
+def config_info(config_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    repository = config["repositories"][0]
+    return {
+        "schema_version": config.get("schema_version"),
+        "config": str(config_path),
+        "repository": repository.get("repository"),
+        "repository_id": repository.get("repository_id"),
+        "repo_path": repository.get("repo_path"),
+        "scheduler": config.get("scheduler", {}),
+    }
+
+
+def resolve_info(repo_path: Path | None = None, repository: str | None = None,
+                 repository_id: str | None = None) -> dict[str, Any]:
+    selected = sum(value is not None for value in (repo_path, repository, repository_id))
+    if selected > 1:
+        raise AdminError("select the installation by only one of repo-path, repository, or repository-id")
+    if selected == 0:
+        repo_path = Path.cwd()
+    if repo_path is not None:
+        return marker(repo_path)
+    matches = []
+    for config_path, config in installed_configs():
+        info = config_info(config_path, config)
+        if repository is not None and info["repository"] == repository:
+            matches.append(info)
+        if repository_id is not None and info["repository_id"] == repository_id:
+            matches.append(info)
+    if not matches:
+        raise AdminError("no matching Autopilot installation was found")
+    if len(matches) != 1:
+        raise AdminError("multiple Autopilot installations matched; use repository-id")
+    return matches[0]
+
+
+def exact_git_root(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    result = command(["git", "-C", str(path), "rev-parse", "--show-toplevel"])
+    return result.returncode == 0 and Path(result.stdout.strip()).resolve() == path.resolve()
+
+
+def ledger_summary(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"issues": 0, "unresolved": [], "artifact_blockers": []}
+    try:
+        uri = f"file:{path}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        issues = [dict(row) for row in connection.execute(
+            "SELECT node_id, issue_number, url, status, attempts FROM issues ORDER BY issue_number"
+        )]
+        unresolved_statuses = {
+            "queued", "claimed", "running", "retry-pending", "ready-for-review", "needs-human"
+        }
+        unresolved = [item for item in issues if item["status"] in unresolved_statuses]
+        artifact_blockers: list[dict[str, Any]] = []
+        for issue in issues:
+            if issue["status"] not in {"blocked", "failed"}:
+                continue
+            row = connection.execute(
+                "SELECT worktree_path FROM attempts WHERE node_id=? AND attempt_number=?",
+                (issue["node_id"], issue["attempts"]),
+            ).fetchone()
+            if row and row["worktree_path"] and Path(row["worktree_path"]).exists():
+                artifact_blockers.append(issue)
+        return {"issues": len(issues), "unresolved": unresolved,
+                "artifact_blockers": artifact_blockers}
+    except sqlite3.Error as exc:
+        raise AdminError(f"cannot inspect Autopilot ledger: {exc}") from exc
+    finally:
+        if "connection" in locals():
+            connection.close()
 
 
 def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, label: str,
@@ -310,11 +415,49 @@ def scheduler_health(config_path: Path) -> dict[str, Any]:
                 "errors": [str(exc)]}
 
 
+def workspace_error(config: dict[str, Any]) -> str | None:
+    repository = config["repositories"][0]
+    path = Path(repository["repo_path"])
+    if not path.is_dir():
+        return "repository path is missing"
+    if not exact_git_root(path):
+        return "repository path is not the configured Git root"
+    status = orca_json(config["orca"]["cli"], "status")
+    if status.get("result", {}).get("runtime", {}).get("state") != "ready":
+        raise AdminError("Orca runtime is not ready")
+    try:
+        orca_json(config["orca"]["cli"], "repo", "show", "--repo", f"path:{path}")
+    except AdminError:
+        return "repository is no longer registered in Orca"
+    return None
+
+
+def pause_missing_workspace(config: dict[str, Any], reason: str) -> dict[str, Any]:
+    scheduler = config.get("scheduler", {})
+    identifier = scheduler.get("automation_id")
+    if not identifier:
+        raise AdminError("Orca Automation ID is missing")
+    orca_json(config["orca"]["cli"], "automations", "edit", identifier, "--disabled")
+    try:
+        close_coordinators(config)
+    except AdminError:
+        pass
+    return {"status": "paused-missing-workspace", "run_automation": False,
+            "automation_id": identifier, "reason": reason, "state_preserved": True}
+
+
 def automation_precheck(config_path: Path) -> dict[str, Any]:
     try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config = read_config(config_path)
         orca = config["orca"]["cli"]
         repository = config["repositories"][0]
+        missing = workspace_error(config)
+        if missing:
+            try:
+                return pause_missing_workspace(config, missing)
+            except AdminError as exc:
+                return {"status": "pause-failed-missing-workspace", "run_automation": False,
+                        "reason": missing, "error": str(exc), "state_preserved": True}
         terminals = orca_json(orca, "terminal", "list", "--worktree",
                               f"path:{repository['repo_path']}")
         connected = [item for item in terminals.get("result", {}).get("terminals", [])
@@ -329,7 +472,10 @@ def automation_precheck(config_path: Path) -> dict[str, Any]:
 
 
 def ensure_coordinator(config_path: Path) -> dict[str, Any]:
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = read_config(config_path)
+    missing = workspace_error(config)
+    if missing:
+        return pause_missing_workspace(config, missing)
     orca = config["orca"]["cli"]
     status = orca_json(orca, "status")
     if status.get("result", {}).get("runtime", {}).get("state") != "ready":
@@ -415,8 +561,11 @@ def configure_automation(config: dict[str, Any], config_path: Path,
 def close_coordinators(config: dict[str, Any]) -> int:
     orca = config["orca"]["cli"]
     repository = config["repositories"][0]
-    terminals = orca_json(orca, "terminal", "list", "--worktree",
-                          f"path:{repository['repo_path']}")
+    try:
+        terminals = orca_json(orca, "terminal", "list", "--worktree",
+                              f"path:{repository['repo_path']}")
+    except AdminError:
+        return 0
     closed = 0
     for item in terminals.get("result", {}).get("terminals", []):
         if item.get("title") == COORDINATOR_TITLE and item.get("handle"):
@@ -692,13 +841,33 @@ def doctor(repo_path: Path) -> dict[str, Any]:
     return result
 
 
-def stop(repo_path: Path) -> dict[str, Any]:
-    info = marker(repo_path)
+def list_installations() -> dict[str, Any]:
+    installations: list[dict[str, Any]] = []
+    for config_path, config in installed_configs():
+        info = config_info(config_path, config)
+        path = Path(str(info["repo_path"]))
+        ledger = ledger_summary(Path(config.get("state_db", config_path.parent / "state.sqlite3")))
+        scheduler = scheduler_health(config_path)
+        installations.append({
+            "repository": info["repository"],
+            "repository_id": info["repository_id"],
+            "repo_path": str(path),
+            "git_root": exact_git_root(path),
+            "automation_id": info["scheduler"].get("automation_id"),
+            "automation_exists": scheduler["exists"],
+            "automation_enabled": scheduler["enabled"],
+            "issues": ledger["issues"],
+            "unresolved": len(ledger["unresolved"]),
+            "artifact_blockers": len(ledger["artifact_blockers"]),
+        })
+    return {"status": "ok", "installations": installations}
+
+
+def stop(repo_path: Path | None = None, repository: str | None = None,
+         repository_id: str | None = None) -> dict[str, Any]:
+    info = resolve_info(repo_path, repository, repository_id)
     config_path = Path(info["config"])
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise AdminError(f"cannot read Autopilot configuration: {exc}") from exc
+    config = read_config(config_path)
     if config.get("schema_version") == 3:
         scheduler = config.get("scheduler", {})
         identifier = scheduler.get("automation_id")
@@ -725,7 +894,8 @@ def stop(repo_path: Path) -> dict[str, Any]:
         config = json.loads(Path(info["config"]).read_text(encoding="utf-8"))
         orca = config.get("orca", {}).get("cli")
         if orca:
-            terminals = orca_json(orca, "terminal", "list", "--worktree", f"path:{repository_root(repo_path)}")
+            terminals = orca_json(orca, "terminal", "list", "--worktree",
+                                  f"path:{config['repositories'][0]['repo_path']}")
             for item in terminals.get("result", {}).get("terminals", []):
                 if item.get("title") == COORDINATOR_TITLE and item.get("handle"):
                     orca_json(orca, "terminal", "close", "--terminal", item["handle"])
@@ -733,6 +903,72 @@ def stop(repo_path: Path) -> dict[str, Any]:
         pass
     return {"status": "stopped", "repository": info["repository"], "state_preserved": True,
             "disabled_plist": str(disabled_path) if disabled_path.exists() else None}
+
+
+def uninstall(repo_path: Path | None = None, repository: str | None = None,
+              repository_id: str | None = None) -> dict[str, Any]:
+    info = resolve_info(repo_path, repository, repository_id)
+    config_path = Path(info["config"])
+    config = read_config(config_path)
+    configured = config["repositories"][0]
+    configured_id = configured.get("repository_id")
+    if not isinstance(configured_id, str) or not configured_id:
+        raise AdminError("repository ID is required for safe uninstall")
+    paths = build_paths(configured_id)
+    active_root = Path(paths["root"])
+    if config_path.resolve() != Path(paths["config"]).resolve() or active_root.parent != state_root():
+        raise AdminError("configuration is outside the repository-isolated state directory")
+
+    stop(repository=configured["repository"])
+    ledger = ledger_summary(Path(config["state_db"]))
+    blockers = [*ledger["unresolved"], *ledger["artifact_blockers"]]
+    if blockers:
+        labels = ", ".join(f"#{item['issue_number']} ({item['status']})" for item in blockers)
+        raise AdminError(f"uninstall blocked by unresolved attempts: {labels}")
+
+    scheduler = config.get("scheduler", {})
+    identifier = scheduler.get("automation_id")
+    if not isinstance(identifier, str) or not identifier:
+        raise AdminError("Orca Automation ID is missing")
+    archive_parent = state_root() / "archives"
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_path = archive_parent / f"{stamp}-{paths['key']}"
+    if archive_path.exists():
+        raise AdminError("archive destination already exists")
+    runs = orca_json(config["orca"]["cli"], "automations", "runs", "--id", identifier)
+    atomic_write(active_root / "automation-runs.json",
+                 (json.dumps(runs, ensure_ascii=False, indent=2) + "\n").encode())
+    archived_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    manifest = {"schema_version": 1, "archived_at": archived_at,
+                "repository": configured["repository"], "repository_id": configured_id,
+                "repo_path": configured["repo_path"], "automation_id": identifier,
+                "ledger": ledger}
+    atomic_write(active_root / "archive-manifest.json",
+                 (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode())
+    orca_json(config["orca"]["cli"], "automations", "remove", identifier)
+
+    marker_removed = False
+    repo = Path(configured["repo_path"])
+    if exact_git_root(repo):
+        marker_path = git_common_dir(repo) / "github-issue-autopilot.json"
+        try:
+            marker_path.unlink(missing_ok=True)
+            marker_removed = True
+        except OSError:
+            marker_removed = False
+    archive_parent.mkdir(parents=True, exist_ok=True)
+    os.replace(active_root, archive_path)
+    return {"status": "uninstalled", "repository": configured["repository"],
+            "automation_removed": True, "state_archived": True,
+            "archive": str(archive_path), "marker_removed": marker_removed,
+            "local_repository_removed": False}
+
+
+def selector_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--repo-path", type=Path)
+    group.add_argument("--repository")
+    group.add_argument("--repository-id")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -748,9 +984,14 @@ def parser() -> argparse.ArgumentParser:
                                 help="create or update the Orca Automation without enabling it")
     install_parser.add_argument("--no-load", action="store_true",
                                 help="deprecated alias for --disabled")
-    for name in ("doctor", "status", "stop"):
+    for name in ("doctor", "status"):
         sub = commands.add_parser(name)
         sub.add_argument("--repo-path", type=Path, default=Path.cwd())
+    commands.add_parser("list")
+    stop_parser = commands.add_parser("stop")
+    selector_arguments(stop_parser)
+    uninstall_parser = commands.add_parser("uninstall")
+    selector_arguments(uninstall_parser)
     ensure = commands.add_parser("ensure")
     ensure.add_argument("--config", type=Path, required=True)
     precheck = commands.add_parser("automation-precheck")
@@ -759,6 +1000,9 @@ def parser() -> argparse.ArgumentParser:
     retry.add_argument("--repo-path", type=Path, default=Path.cwd())
     retry.add_argument("--issue-url", required=True)
     retry.add_argument("--discard-worktree", action="store_true")
+    discard = commands.add_parser("discard")
+    discard.add_argument("--repo-path", type=Path, default=Path.cwd())
+    discard.add_argument("--issue-url", required=True)
     accept = commands.add_parser("accept")
     accept.add_argument("--repo-path", type=Path, default=Path.cwd())
     accept.add_argument("--issue-url", required=True)
@@ -776,8 +1020,12 @@ def main() -> int:
             result = ensure_coordinator(args.config)
         elif args.operation == "automation-precheck":
             result = automation_precheck(args.config)
+        elif args.operation == "list":
+            result = list_installations()
         elif args.operation == "stop":
-            result = stop(args.repo_path)
+            result = stop(args.repo_path, args.repository, args.repository_id)
+        elif args.operation == "uninstall":
+            result = uninstall(args.repo_path, args.repository, args.repository_id)
         elif args.operation == "doctor":
             result = doctor(args.repo_path)
         elif args.operation == "status":
@@ -787,6 +1035,8 @@ def main() -> int:
             if args.discard_worktree:
                 extra.append("--discard-worktree")
             result = run_watcher(args.repo_path, "retry", extra)
+        elif args.operation == "discard":
+            result = run_watcher(args.repo_path, "discard", ["--issue-url", args.issue_url])
         else:
             result = run_watcher(args.repo_path, "accept",
                                  ["--issue-url", args.issue_url, "--target-branch", args.target_branch])

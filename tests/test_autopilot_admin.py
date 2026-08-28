@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -109,14 +110,113 @@ class AutopilotAdminTests(unittest.TestCase):
         connected = {"result": {"terminals": [
             {"title": "Issue Autopilot Coordinator", "connected": True, "handle": "t1"}
         ]}}
-        with mock.patch.object(ADMIN, "orca_json", return_value=connected):
+        ready = {"result": {"runtime": {"state": "ready"}}}
+        with mock.patch.object(ADMIN, "orca_json", side_effect=[
+            ready, {"result": {"repo": {"path": str(self.repo)}}}, connected,
+        ]):
             result = ADMIN.automation_precheck(config)
         self.assertEqual("healthy", result["status"])
         self.assertFalse(result["run_automation"])
-        with mock.patch.object(ADMIN, "orca_json", return_value={"result": {"terminals": []}}):
+        with mock.patch.object(ADMIN, "orca_json", side_effect=[
+            ready, {"result": {"repo": {"path": str(self.repo)}}},
+            {"result": {"terminals": []}},
+        ]):
             result = ADMIN.automation_precheck(config)
         self.assertEqual("needs-recovery", result["status"])
         self.assertTrue(result["run_automation"])
+
+    def test_precheck_pauses_when_repository_path_is_missing(self) -> None:
+        config = self.root / "autopilot.json"
+        config.write_text(json.dumps({
+            "repositories": [{"repo_path": str(self.root / "missing")}],
+            "orca": {"cli": "/bin/orca"},
+            "scheduler": {"automation_id": "auto-1"},
+        }), encoding="utf-8")
+        with mock.patch.object(ADMIN, "orca_json", return_value={"result": {}}) as call:
+            result = ADMIN.automation_precheck(config)
+        self.assertEqual("paused-missing-workspace", result["status"])
+        self.assertFalse(result["run_automation"])
+        self.assertTrue(result["state_preserved"])
+        self.assertIn(mock.call("/bin/orca", "automations", "edit", "auto-1", "--disabled"),
+                      call.call_args_list)
+
+    def test_repository_selector_survives_deleted_checkout(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "GITHUB_ISSUE_AUTOPILOT_STATE_ROOT": str(self.root / "state"),
+        }):
+            paths = ADMIN.build_paths("R_one")
+            config = {
+                "schema_version": 3,
+                "repositories": [{"repository": "owner/repo", "repository_id": "R_one",
+                                  "repo_path": str(self.root / "deleted")}],
+                "scheduler": {"backend": "orca-automation", "automation_id": "auto-1"},
+            }
+            Path(paths["config"]).parent.mkdir(parents=True)
+            Path(paths["config"]).write_text(json.dumps(config), encoding="utf-8")
+            info = ADMIN.resolve_info(repository="owner/repo")
+        self.assertEqual("R_one", info["repository_id"])
+        self.assertEqual(str(paths["config"]), info["config"])
+
+    def test_uninstall_refuses_unresolved_ledger(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "GITHUB_ISSUE_AUTOPILOT_STATE_ROOT": str(self.root / "state"),
+        }):
+            paths = ADMIN.build_paths("R_one")
+            config = {
+                "schema_version": 3, "state_db": str(paths["database"]),
+                "repositories": [{"repository": "owner/repo", "repository_id": "R_one",
+                                  "repo_path": str(self.repo)}],
+                "orca": {"cli": "/bin/orca"},
+                "scheduler": {"backend": "orca-automation", "automation_id": "auto-1"},
+            }
+            Path(paths["config"]).parent.mkdir(parents=True)
+            Path(paths["config"]).write_text(json.dumps(config), encoding="utf-8")
+            connection = sqlite3.connect(paths["database"])
+            connection.executescript(
+                "CREATE TABLE issues(node_id TEXT, issue_number INTEGER, url TEXT, status TEXT, attempts INTEGER);"
+                "CREATE TABLE attempts(node_id TEXT, attempt_number INTEGER, worktree_path TEXT);"
+                "INSERT INTO issues VALUES('node', 8, 'https://example/8', 'running', 1);"
+            )
+            connection.close()
+            with mock.patch.object(ADMIN, "stop", return_value={"status": "stopped"}), self.assertRaisesRegex(
+                ADMIN.AdminError, "#8 \(running\)"
+            ):
+                ADMIN.uninstall(repository="owner/repo")
+        self.assertTrue(Path(paths["config"]).exists())
+
+    def test_uninstall_removes_automation_and_archives_state(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "GITHUB_ISSUE_AUTOPILOT_STATE_ROOT": str(self.root / "state"),
+        }):
+            paths = ADMIN.build_paths("R_one")
+            config = {
+                "schema_version": 3, "state_db": str(paths["database"]),
+                "repositories": [{"repository": "owner/repo", "repository_id": "R_one",
+                                  "repo_path": str(self.repo)}],
+                "orca": {"cli": "/bin/orca"},
+                "scheduler": {"backend": "orca-automation", "automation_id": "auto-1"},
+            }
+            Path(paths["config"]).parent.mkdir(parents=True)
+            Path(paths["config"]).write_text(json.dumps(config), encoding="utf-8")
+            connection = sqlite3.connect(paths["database"])
+            connection.executescript(
+                "CREATE TABLE issues(node_id TEXT, issue_number INTEGER, url TEXT, status TEXT, attempts INTEGER);"
+                "CREATE TABLE attempts(node_id TEXT, attempt_number INTEGER, worktree_path TEXT);"
+                "INSERT INTO issues VALUES('node', 7, 'https://example/7', 'accepted', 1);"
+            )
+            connection.close()
+            with mock.patch.object(ADMIN, "stop", return_value={"status": "stopped"}), mock.patch.object(
+                ADMIN, "orca_json", return_value={"result": {"runs": []}}
+            ) as orca:
+                result = ADMIN.uninstall(repository_id="R_one")
+        self.assertEqual("uninstalled", result["status"])
+        self.assertFalse(Path(paths["root"]).exists())
+        archive = Path(result["archive"])
+        self.assertTrue((archive / "state.sqlite3").is_file())
+        self.assertTrue((archive / "automation-runs.json").is_file())
+        self.assertTrue((archive / "archive-manifest.json").is_file())
+        self.assertIn(mock.call("/bin/orca", "automations", "remove", "auto-1"),
+                      orca.call_args_list)
 
     def test_coordinator_replaces_shell_so_exit_disconnects_terminal(self) -> None:
         config = self.root / "autopilot.json"
@@ -125,6 +225,8 @@ class AutopilotAdminTests(unittest.TestCase):
             "orca": {"cli": "/bin/orca"},
         }), encoding="utf-8")
         responses = [
+            {"result": {"runtime": {"state": "ready"}}},
+            {"result": {"repo": {"path": str(self.repo)}}},
             {"result": {"runtime": {"state": "ready"}}},
             {"result": {"terminals": []}},
             {"result": {"terminal": {"handle": "t1"}}},
@@ -144,6 +246,8 @@ class AutopilotAdminTests(unittest.TestCase):
             "orca": {"cli": "/bin/orca"},
         }), encoding="utf-8")
         responses = [
+            {"result": {"runtime": {"state": "ready"}}},
+            {"result": {"repo": {"path": str(self.repo)}}},
             {"result": {"runtime": {"state": "ready"}}},
             {"result": {"terminals": [
                 {"title": "Issue Autopilot Coordinator", "connected": True, "handle": "old-1"},

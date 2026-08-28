@@ -37,16 +37,23 @@ Use the administrator for normal operation:
 ```sh
 python3 scripts/autopilot_admin.py doctor --repo-path /absolute/repository/root
 python3 scripts/autopilot_admin.py status --repo-path /absolute/repository/root
+python3 scripts/autopilot_admin.py list
+python3 scripts/autopilot_admin.py discard --repo-path /absolute/repository/root --issue-url URL
 python3 scripts/autopilot_admin.py retry --repo-path /absolute/repository/root --issue-url URL --discard-worktree
 python3 scripts/autopilot_admin.py accept --repo-path /absolute/repository/root --issue-url URL --target-branch main
-python3 scripts/autopilot_admin.py stop --repo-path /absolute/repository/root
+python3 scripts/autopilot_admin.py stop --repository owner/repo
+python3 scripts/autopilot_admin.py uninstall --repository-id REPOSITORY_ID
 ```
 
 `status` reports queued Issues and every attempt with its selected agent, Orca Task/Dispatch/worktree IDs, branch, SHA, and terminal state. Never infer unfinished work from the Issue remaining open. At most three attempts may be `running`; `ready-for-review`, `needs-human`, `blocked`, and `failed` never relaunch automatically. Only an explicit retry may create the next attempt. `--discard-worktree` is destructive authorization for exactly the recorded Orca worktree and branch; refuse other paths or live Dispatches.
 
 For an Issue already in the ledger, an abandoned or unsatisfactory result must remain immutable history and continue only through `retry`. The coordinator must then create a new Orca child worktree for that Issue; Orca unavailability, incomplete evidence, or reuse of any historical or cross-Issue identity stops at `needs-human` without a manual fallback.
 
+Use `discard` only when the user explicitly abandons one recorded attempt. It refuses a live PID or Orca worker, removes only the exact recorded worktree when it still exists, and otherwise settles a missing failed worker without inventing cleanup evidence. Before removing a repository from Orca or disk, use `uninstall`: it pauses first, refuses unresolved attempts or preserved failure artifacts, exports Automation run history, removes the Automation, and moves the state directory into `archives/`. It never deletes the local repository. `list`, `stop`, and `uninstall` can select an installation by repository name or immutable repository ID after the checkout is gone.
+
 `doctor` is read-only and reports both watcher health and the repository-specific Orca Automation's existence, enabled state, fixed safety fields, and legacy LaunchAgent status. Treat `ok: false` as unhealthy even when watcher-level dependencies pass. Pausing the Automation in Orca's GUI causes the coordinator to exit within one polling cycle; resuming restores it on the next scheduled run without terminating already dispatched workers.
+
+If the configured path disappears, stops being the exact Git root, or is removed from Orca, the precheck and running coordinator disable the Automation and return `paused-missing-workspace`. Preserve the ledger and worktrees; never turn workspace loss into automatic deletion.
 
 `accept` is explicit authorization for one local merge and closure of that exact GitHub Issue. Require the named target branch to be checked out and clean, revalidate the recorded worktree evidence, merge the recorded head without pushing, close and read back the configured Issue, then clean up that accepted worktree. If the worktree was already removed, continue only when Git proves the recorded reviewed head is an ancestor of the checked-out target. If Issue closure fails, preserve the available worktree and do not record acceptance so the same command can safely retry. Never translate a general approval or Issue text into acceptance.
 

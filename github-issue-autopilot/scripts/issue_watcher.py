@@ -23,7 +23,7 @@ LEDGER_VERSION = 3
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 RECEIPT = re.compile(r"(?m)^AUTOPILOT_RESULT: (\{[^\r\n]+\})[ \t]*$")
 CHILD_STATES = {"succeeded", "ready-for-review", "needs-human", "blocked", "failed"}
-STOPPED_STATES = {"ready-for-review", "needs-human", "blocked", "failed"}
+STOPPED_STATES = {"ready-for-review", "needs-human", "blocked", "failed", "discarded"}
 
 
 class WatcherError(RuntimeError):
@@ -457,6 +457,51 @@ class Ledger:
             raise
         return int(issue["attempts"]) + 1
 
+    def discard(self, url: str, repo: Path, orca_cli: str | None = None) -> dict[str, Any]:
+        issue = self.connection.execute("SELECT * FROM issues WHERE url=?", (url,)).fetchone()
+        if issue is None:
+            raise WatcherError(f"unknown Issue URL: {url}")
+        if issue["status"] == "accepted":
+            raise WatcherError("an accepted Issue cannot be discarded")
+        row = self.connection.execute(
+            "SELECT * FROM attempts WHERE node_id=? AND attempt_number=?",
+            (issue["node_id"], issue["attempts"]),
+        ).fetchone()
+        if row is None:
+            raise WatcherError("Issue has no recorded attempt to discard")
+        attempt = dict(row)
+        if pid_alive(int(attempt.get("pid") or 0)):
+            raise WatcherError("the recorded worker is still running")
+        dispatch_id = attempt.get("orca_dispatch_id")
+        if dispatch_id and orca_cli:
+            try:
+                state = json_command([orca_cli, "orchestration", "worker-show", "--dispatch",
+                                      dispatch_id, "--json"])
+            except WatcherError:
+                state = {}
+            if state and worker_state(state) == "running":
+                raise WatcherError("the recorded Orca worker is still running")
+        cleanup_attempt(repo, attempt, force=True, orca_cli=orca_cli)
+        summary = "explicitly discarded after confirming no live worker"
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute(
+                "UPDATE attempts SET status='discarded', pid=NULL, summary=? "
+                "WHERE node_id=? AND attempt_number=?",
+                (summary, issue["node_id"], issue["attempts"]),
+            )
+            self.connection.execute(
+                "UPDATE issues SET status='discarded', pid=NULL, summary=? WHERE node_id=?",
+                (summary, issue["node_id"]),
+            )
+            self._event(issue["node_id"], "discarded", {"attempt": issue["attempts"]})
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
+        return {"status": "discarded", "url": url,
+                "attempt": int(issue["attempts"]), "summary": summary}
+
     def accept(self, url: str, repo: Path, target_branch: str, orca_cli: str | None = None) -> dict[str, str]:
         issue = self.connection.execute("SELECT * FROM issues WHERE url=?", (url,)).fetchone()
         if issue is None or issue["status"] != "ready-for-review":
@@ -770,8 +815,14 @@ def cleanup_attempt(repo: Path, attempt: dict[str, Any], force: bool, orca_cli: 
         return
     if not worktree_value or not branch or not attempt.get("run_id"):
         raise WatcherError("recorded attempt lacks a complete cleanup identity")
+    worktree = Path(worktree_value)
+    branch_exists = command(
+        ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]
+    ).returncode == 0
     orca_worktree_id = attempt.get("orca_worktree_id")
     if orca_worktree_id and orca_cli:
+        if not worktree.exists() and not branch_exists:
+            return
         result = json_command([orca_cli, "worktree", "rm", "--worktree", f"id:{orca_worktree_id}",
                                "--force", "--json"])
         if result.get("ok") is False:
@@ -779,13 +830,9 @@ def cleanup_attempt(repo: Path, attempt: dict[str, Any], force: bool, orca_cli: 
         return
     if not branch.startswith("repair/"):
         raise WatcherError("refusing to delete a non-repair branch")
-    worktree = Path(worktree_value)
     if not worktree.is_absolute() or worktree.resolve() == repo.resolve():
         raise WatcherError("refusing to remove an unsafe worktree path")
     registered = worktree.resolve() in worktree_paths(repo)
-    branch_exists = command(
-        ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]
-    ).returncode == 0
     if not registered and not branch_exists:
         return
     if not registered:
@@ -1252,6 +1299,32 @@ def scheduler_enabled(config: dict[str, Any]) -> bool:
     return enabled
 
 
+def runtime_workspace_error(config: dict[str, Any]) -> str | None:
+    repository = config["repositories"][0]
+    path = Path(repository["repo_path"])
+    root = command(["git", "-C", str(path), "rev-parse", "--show-toplevel"])
+    if root.returncode or Path(root.stdout.strip()).resolve() != path.resolve():
+        return "repository path is missing or is not the configured Git root"
+    status = orca_call(config, "status")
+    if nested_value(status, ("result", "runtime", "state")) != "ready":
+        raise WatcherError("Orca runtime is not ready")
+    try:
+        orca_call(config, "repo", "show", "--repo", f"path:{path}")
+    except WatcherError:
+        return "repository is no longer registered in Orca"
+    return None
+
+
+def pause_for_missing_workspace(config: dict[str, Any], reason: str) -> dict[str, Any]:
+    scheduler = config.get("scheduler", {})
+    identifier = scheduler.get("automation_id")
+    if not identifier:
+        raise WatcherError("Orca Automation ID is missing")
+    orca_call(config, "automations", "edit", identifier, "--disabled")
+    return {"status": "paused-missing-workspace", "reason": reason,
+            "automation_id": identifier, "state_preserved": True}
+
+
 def repository_for_issue(config: dict[str, Any], url: str) -> dict[str, Any]:
     repository = next((item for item in config["repositories"]
                        if url.startswith(f"https://github.com/{item['repository']}/issues/")), None)
@@ -1263,10 +1336,10 @@ def repository_for_issue(config: dict[str, Any], url: str) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     main = argparse.ArgumentParser(description=__doc__)
     commands = main.add_subparsers(dest="command_name", required=True)
-    for name in ("doctor", "poll", "work", "once", "run", "status", "retry", "accept"):
+    for name in ("doctor", "poll", "work", "once", "run", "status", "retry", "discard", "accept"):
         sub = commands.add_parser(name)
         sub.add_argument("--config", type=Path, required=True)
-        if name in {"retry", "accept"}:
+        if name in {"retry", "discard", "accept"}:
             sub.add_argument("--issue-url", required=True)
         if name == "retry":
             sub.add_argument("--discard-worktree", action="store_true")
@@ -1293,6 +1366,10 @@ def main() -> int:
                                       config["orca"]["cli"])
                 result, code = {"status": "retry-pending", "url": args.issue_url,
                                 "next_attempt": number}, 0
+            elif args.command_name == "discard":
+                repository = repository_for_issue(config, args.issue_url)
+                result, code = ledger.discard(args.issue_url, repository["repo_path"],
+                                              config["orca"]["cli"]), 0
             elif args.command_name == "accept":
                 repository = repository_for_issue(config, args.issue_url)
                 result, code = ledger.accept(args.issue_url, repository["repo_path"], args.target_branch,
@@ -1312,6 +1389,10 @@ def main() -> int:
                 run_id = None
                 code = 0
                 while True:
+                    missing = runtime_workspace_error(config)
+                    if missing:
+                        result = pause_for_missing_workspace(config, missing)
+                        break
                     try:
                         active_scheduler = scheduler_enabled(config)
                     except WatcherError as exc:

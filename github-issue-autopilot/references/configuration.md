@@ -68,3 +68,28 @@ Every attempt must receive a fresh Orca Task ID, Dispatch ID, worktree ID, and a
 Successful worktrees remain `in-review` until explicit acceptance. Accepting requires a clean, explicitly named target branch, merges without pushing, and closes the exact configured GitHub Issue only after the merge succeeds. If a repair was merged manually and its worktree is gone, acceptance continues only when Git proves the recorded reviewed head is already an ancestor of the checked-out target. The command reads the Issue back as closed before recording acceptance or cleaning the worktree; a closure failure remains retryable. Retrying with `--discard-worktree` removes only the exact recorded Orca worktree after its Dispatch is no longer live. Automated publication remains fixed to `never`.
 
 The scheduler fields are installer-owned safety settings. Pausing and resuming in Orca's GUI is supported; changing the trigger, provider, workspace, prompt, or precheck makes `doctor` report configuration drift. See [`orca-automation.md`](orca-automation.md) for migration, recovery, and pause behavior.
+
+## Repository removal and uninstall
+
+List every active installation before removing a checkout:
+
+```sh
+python3 scripts/autopilot_admin.py list
+python3 scripts/autopilot_admin.py stop --repository owner/repo
+```
+
+`list`, `stop`, and `uninstall` can select by `--repo-path`, `--repository owner/repo`, or immutable `--repository-id`. The name and ID selectors read the repository-isolated configuration under `~/.local/state/github-issue-autopilot/`, so they still work after the checkout path is gone.
+
+If the precheck or running coordinator finds that the path is missing, is no longer the exact Git root, or is no longer registered in Orca, it disables the Automation and returns `paused-missing-workspace`. This is a fail-safe pause: the SQLite ledger, logs, branches, and worktrees are preserved.
+
+Settle every outstanding result before uninstalling. `accept` keeps a reviewed result; `discard` explicitly abandons one attempt after proving that neither its local PID nor its Orca Dispatch is live. `discard` removes only the recorded worktree when present and records a terminal `discarded` state; it does not queue another attempt.
+
+```sh
+python3 scripts/autopilot_admin.py discard \
+  --repo-path /absolute/repository/root \
+  --issue-url https://github.com/owner/repo/issues/123
+
+python3 scripts/autopilot_admin.py uninstall --repository-id R_kgDOExample
+```
+
+`uninstall` pauses first and refuses queued, claimed, running, retry-pending, review-ready, or human-action attempts. A failed or blocked attempt also blocks while its recorded worktree still exists. After the gate passes, the command exports Orca Automation run history, removes the Automation and Git marker, and atomically moves configuration, SQLite, logs, and runtime copies to `~/.local/state/github-issue-autopilot/archives/`. It never deletes the local repository.

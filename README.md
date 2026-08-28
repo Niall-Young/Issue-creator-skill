@@ -90,8 +90,19 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 - 三个 Skill 的 `agents/openai.yaml` 提供 OpenAI 兼容 Agent 的界面配置并允许自动发现；技能发现本身不构成修改代码或远程写入授权。
 - `github-issue-repair/scripts/run_state.py` 使用 Python 标准库，在仓库 Git 公共目录中维护运行账本，无需额外依赖。
-- `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、检查、停用、验收或重做仓库循环；`issue_watcher.py` 负责全部合格 open Issue 的扫描、最多三任务领取、Orca 调度、attempt 账本和 Git 证据回读，远程发布策略固定为 `never`。
+- `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、列举、检查、停用、验收、放弃、重做或卸载仓库循环；`issue_watcher.py` 负责全部合格 open Issue 的扫描、最多三任务领取、Orca 调度、attempt 账本和 Git 证据回读，远程发布策略固定为 `never`。
 - 管理员级 `doctor` 同时检查 watcher、Orca Automation 的启用状态与安全字段，以及是否残留重复的旧 LaunchAgent，全程只读并返回可诊断字段。每轮扫描包含启用前已创建但当前仍符合作者与标签策略的 open Issue，再由不可变 Issue node ID 去重，避免漏单和重复派单。
+
+移除 Orca 项目或删除本地仓库前，先处理待验收和运行中的任务，再卸载自动化：
+
+```sh
+python3 github-issue-autopilot/scripts/autopilot_admin.py list
+python3 github-issue-autopilot/scripts/autopilot_admin.py stop --repository owner/repo
+python3 github-issue-autopilot/scripts/autopilot_admin.py discard --repo-path /absolute/repository/root --issue-url URL
+python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository-id REPOSITORY_ID
+```
+
+仓库路径丢失、不再是原 Git 根目录或被移出 Orca 时，预检和协调器会自动暂停 Automation，不会删除账本或启动恢复 Agent。`list`、`stop`、`uninstall` 可在仓库已删除后按仓库名或不可变 ID 定位安装。`uninstall` 会拒绝未决任务，导出 Automation 历史，并把配置、SQLite、日志与 runtime 副本移入 `~/.local/state/github-issue-autopilot/archives/`；它不会删除本地仓库。
 
 ### 项目结构
 
@@ -225,8 +236,19 @@ In any GitHub checkout, ask the Agent to “build an Issue loop.” Autopilot cr
 
 - Each Skill's `agents/openai.yaml` provides OpenAI-compatible UI metadata and allows automatic discovery. Skill discovery is not authorization to edit code or write remotely.
 - `github-issue-repair/scripts/run_state.py` uses only the Python standard library and stores its ledger under the repository's common Git directory.
-- `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, checks, stops, accepts, or retries a repository loop. `issue_watcher.py` owns full eligible-open-Issue scans, three-slot claims, Orca dispatch, attempt history, and Git evidence readback; remote publication remains fixed to `never`.
+- `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, lists, checks, stops, accepts, discards, retries, or uninstalls a repository loop. `issue_watcher.py` owns full eligible-open-Issue scans, three-slot claims, Orca dispatch, attempt history, and Git evidence readback; remote publication remains fixed to `never`.
 - Administrator-level `doctor` checks the watcher, the Orca Automation's enabled state and safety fields, and any duplicate legacy LaunchAgent without mutating them. Every poll includes older open Issues that still match the author and label policy, then relies on immutable Issue node IDs to prevent duplicate dispatch.
+
+Before removing an Orca project or deleting its checkout, settle review-ready and running work, then uninstall the Automation:
+
+```sh
+python3 github-issue-autopilot/scripts/autopilot_admin.py list
+python3 github-issue-autopilot/scripts/autopilot_admin.py stop --repository owner/repo
+python3 github-issue-autopilot/scripts/autopilot_admin.py discard --repo-path /absolute/repository/root --issue-url URL
+python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository-id REPOSITORY_ID
+```
+
+If the path disappears, is no longer the original Git root, or is removed from Orca, the precheck and coordinator pause the Automation without deleting the ledger or launching a recovery Agent. `list`, `stop`, and `uninstall` can locate an installation by repository name or immutable ID after the checkout is gone. `uninstall` refuses unresolved work, exports Automation history, and moves configuration, SQLite, logs, and runtime copies into `~/.local/state/github-issue-autopilot/archives/`; it never deletes the local repository.
 
 ### Project Structure
 
