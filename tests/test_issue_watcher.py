@@ -298,6 +298,39 @@ class IssueWatcherTests(unittest.TestCase):
         with self.assertRaisesRegex(WATCHER.WatcherError, "activate_after"):
             WATCHER.load_config(path)
 
+    def doctor_with_orca_cli(self, executable: str) -> dict:
+        config = self.config()
+        config["orca"]["cli"] = executable
+        config["repositories"][0]["repo_path"] = self.repo.resolve()
+        healthy = subprocess.CompletedProcess([], 0, str(self.repo.resolve()), "")
+        with mock.patch.object(WATCHER.shutil, "which", return_value="/usr/bin/gh"), mock.patch.object(
+            WATCHER, "command", return_value=healthy
+        ), mock.patch.object(WATCHER, "repository_metadata"), mock.patch.object(
+            WATCHER, "orca_call", return_value={"result": {"runtime": {"state": "ready"}}}
+        ):
+            return WATCHER.doctor(config)
+
+    def test_doctor_accepts_executable_absolute_orca_cli(self) -> None:
+        executable = self.root / "orca"
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o700)
+        result = self.doctor_with_orca_cli(str(executable))
+        self.assertTrue(result["orca"])
+        self.assertTrue(result["ok"])
+
+    def test_doctor_rejects_non_executable_absolute_orca_cli(self) -> None:
+        executable = self.root / "orca"
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o600)
+        result = self.doctor_with_orca_cli(str(executable))
+        self.assertFalse(result["orca"])
+        self.assertFalse(result["ok"])
+
+    def test_doctor_rejects_missing_absolute_orca_cli(self) -> None:
+        result = self.doctor_with_orca_cli(str(self.root / "missing-orca"))
+        self.assertFalse(result["orca"])
+        self.assertFalse(result["ok"])
+
     def test_success_receipt_must_resolve_to_registered_repair_worktree(self) -> None:
         worktree = self.root / "repair-worktree"
         subprocess.run(
