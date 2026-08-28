@@ -252,6 +252,20 @@ def run_watcher(repo_path: Path, operation: str, extra: list[str] | None = None)
     return watcher_result
 
 
+def launchctl_arguments(output: str) -> list[str]:
+    arguments: list[str] = []
+    reading = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped == "arguments = {":
+            reading = True
+        elif reading and stripped == "}":
+            break
+        elif reading and stripped:
+            arguments.append(stripped)
+    return arguments
+
+
 def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
     paths = build_paths(info["repository_id"])
     plist_path = Path(paths["plist"])
@@ -263,8 +277,10 @@ def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
         "plist_exists": plist_path.is_file(),
         "configuration_matches": False,
         "loaded": False,
+        "loaded_configuration_matches": False,
         "errors": [],
     }
+    expected: dict[str, Any] | None = None
     if health["plist_exists"]:
         try:
             actual = plistlib.loads(plist_path.read_bytes())
@@ -281,7 +297,14 @@ def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
     health["loaded"] = loaded.returncode == 0
     if not health["loaded"]:
         health["errors"].append("LaunchAgent is not loaded")
-    health["ok"] = bool(health["plist_exists"] and health["configuration_matches"] and health["loaded"])
+    elif expected is not None:
+        health["loaded_configuration_matches"] = (
+            launchctl_arguments(loaded.stdout) == expected["ProgramArguments"]
+        )
+        if not health["loaded_configuration_matches"]:
+            health["errors"].append("Loaded LaunchAgent does not match the installed configuration")
+    health["ok"] = bool(health["plist_exists"] and health["configuration_matches"]
+                        and health["loaded"] and health["loaded_configuration_matches"])
     return health
 
 

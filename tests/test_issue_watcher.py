@@ -186,17 +186,41 @@ class IssueWatcherTests(unittest.TestCase):
             eligible = WATCHER.list_issues(repository, "owner", created_after=boundary)
         self.assertEqual(["boundary"], [issue["id"] for issue in eligible])
 
-    def test_overlapping_poll_window_deduplicates_replayed_node_id(self) -> None:
+    def test_two_poll_boundary_replays_late_issue_and_deduplicates_node_id(self) -> None:
         config, ledger = self.config(), self.ledger()
-        issue = {**self.issue(), "author": {"login": "owner"}, "labels": []}
+        issue = {**self.issue(), "createdAt": "2026-08-27T01:00:01Z",
+                 "author": {"login": "owner"}, "labels": []}
+        metadata = {"id": "R_1", "nameWithOwner": "owner/repo",
+                    "isArchived": False, "hasIssuesEnabled": True}
+        empty = subprocess.CompletedProcess([], 0, "[]", "")
+        visible = subprocess.CompletedProcess([], 0, json.dumps([issue]), "")
+        repo = subprocess.CompletedProcess([], 0, json.dumps(metadata), "")
+        boundaries = [
+            dt.datetime(2026, 8, 27, 1, 0, 1, 900000, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 8, 27, 1, 0, 2, 900000, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 8, 27, 1, 0, 2, 950000, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 8, 27, 1, 0, 3, 900000, tzinfo=dt.timezone.utc),
+        ]
         with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
-            WATCHER, "list_issues", return_value=[issue]
-        ):
+            WATCHER, "now", side_effect=boundaries
+        ), mock.patch.object(WATCHER, "command", side_effect=[repo, empty, repo, visible, repo, visible]):
             first = WATCHER.poll(config, ledger)
             second = WATCHER.poll(config, ledger)
-        self.assertEqual(1, first["enqueued"])
-        self.assertEqual(0, second["enqueued"])
+            replay = WATCHER.poll(config, ledger)
+        self.assertEqual(0, first["enqueued"])
+        self.assertEqual(1, second["enqueued"])
+        self.assertEqual(0, replay["enqueued"])
         self.assertEqual(1, len(ledger.snapshot()["issues"]))
+
+    def test_doctor_does_not_initialize_sqlite_ledger(self) -> None:
+        config = self.config()
+        with mock.patch.object(WATCHER.sys, "argv", ["issue_watcher.py", "doctor",
+                                                     "--config", str(self.root / "config.json")]), mock.patch.object(
+            WATCHER, "load_config", return_value=config
+        ), mock.patch.object(WATCHER, "doctor", return_value={"ok": True}), mock.patch.object(
+            WATCHER, "Ledger", side_effect=AssertionError("doctor must stay read-only")
+        ), mock.patch("builtins.print"):
+            self.assertEqual(0, WATCHER.main())
 
     def test_claim_many_starts_three_and_leaves_the_fourth_queued(self) -> None:
         ledger = self.ledger()
