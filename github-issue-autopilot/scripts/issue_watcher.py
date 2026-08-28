@@ -409,16 +409,26 @@ class Ledger:
         attempt = dict(self.connection.execute(
             "SELECT * FROM attempts WHERE node_id=? AND attempt_number=?", (issue["node_id"], issue["attempts"])
         ).fetchone())
-        validate_attempt(repo, attempt)
         if git(repo, "branch", "--show-current") != target_branch:
             raise WatcherError(f"target branch {target_branch} is not checked out")
         if git(repo, "status", "--porcelain"):
             raise WatcherError("target worktree must be clean before merging")
-        result = command(["git", "-C", str(repo), "merge", "--no-ff", "--no-edit", attempt["head_sha"]])
-        if result.returncode:
-            raise WatcherError(result.stderr.strip() or "local merge failed")
-        self._update(issue["node_id"], issue["attempts"], "accepted", {"summary": "merged locally"}, "accepted")
-        response = {"status": "accepted", "target_branch": target_branch, "head": git(repo, "rev-parse", "HEAD")}
+        worktree_value = attempt.get("worktree_path")
+        registered = (isinstance(worktree_value, str) and Path(worktree_value).is_absolute()
+                      and Path(worktree_value).resolve() in worktree_paths(repo))
+        if registered:
+            validate_attempt(repo, attempt)
+            result = command(["git", "-C", str(repo), "merge", "--no-ff", "--no-edit",
+                              attempt["head_sha"]])
+            if result.returncode:
+                raise WatcherError(result.stderr.strip() or "local merge failed")
+        else:
+            validate_already_merged_attempt(repo, attempt, url)
+        close_github_issue(url)
+        self._update(issue["node_id"], issue["attempts"], "accepted",
+                     {"summary": "merged locally and closed Issue"}, "accepted")
+        response = {"status": "accepted", "target_branch": target_branch,
+                    "head": git(repo, "rev-parse", "HEAD"), "issue": "closed"}
         try:
             cleanup_attempt(repo, attempt, force=False, orca_cli=orca_cli)
         except WatcherError as exc:
@@ -464,6 +474,29 @@ def command(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedPro
         if result.returncode == 0 or "EOF" not in result.stderr or attempt == attempts - 1:
             return result
     return result
+
+
+def github_issue_state(url: str) -> str:
+    result = command(["gh", "issue", "view", url, "--json", "state,url"])
+    if result.returncode:
+        raise WatcherError(result.stderr.strip() or "could not read GitHub Issue state")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise WatcherError("gh issue view returned invalid JSON") from exc
+    if not isinstance(value, dict) or value.get("url") != url or value.get("state") not in {"OPEN", "CLOSED"}:
+        raise WatcherError("gh issue view returned an unexpected Issue")
+    return str(value["state"])
+
+
+def close_github_issue(url: str) -> None:
+    if github_issue_state(url) == "CLOSED":
+        return
+    result = command(["gh", "issue", "close", url, "--reason", "completed"])
+    if result.returncode and github_issue_state(url) != "CLOSED":
+        raise WatcherError(result.stderr.strip() or "GitHub Issue close failed")
+    if github_issue_state(url) != "CLOSED":
+        raise WatcherError("GitHub Issue remained open after close")
 
 
 def json_command(argv: list[str], cwd: Path | None = None) -> dict[str, Any]:
@@ -621,7 +654,41 @@ def validate_attempt(repo: Path, attempt: dict[str, Any]) -> None:
         raise WatcherError("repair run ledger does not confirm a reviewed local result")
 
 
+def validate_already_merged_attempt(repo: Path, attempt: dict[str, Any], url: str) -> None:
+    required = ("run_id", "worktree_path", "branch", "base_sha", "head_sha")
+    if any(not isinstance(attempt.get(key), str) or not attempt[key] for key in required):
+        raise WatcherError("successful receipt is missing worktree evidence")
+    for name in ("base_sha", "head_sha"):
+        if git(repo, "rev-parse", f"{attempt[name]}^{{commit}}") != attempt[name]:
+            raise WatcherError(f"receipt {name.removesuffix('_sha')} SHA is invalid")
+    state = load_repair_run_state(repo, attempt["run_id"])
+    commit_receipts = [receipt.get("value") for receipt in state.get("receipts", {}).values()
+                       if isinstance(receipt, dict) and receipt.get("kind") == "commit"]
+    if (state.get("base_sha") != attempt["base_sha"]
+            or state.get("source_url") != url
+            or attempt["head_sha"] not in commit_receipts
+            or state.get("state") not in {"REVIEW", "AWAIT_PUBLICATION_APPROVAL"}):
+        raise WatcherError("repair run ledger does not confirm a reviewed local result")
+    merged = command(["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                      attempt["head_sha"], "HEAD"])
+    if merged.returncode:
+        raise WatcherError("recorded head is not merged into the target branch")
+
+
 def repair_run_state(repo: Path, run_id: str) -> dict[str, Any]:
+    state = load_repair_run_state(repo, run_id)
+    common = git_common_dir(repo)
+    recorded_repo = Path(state.get("repository", "")).resolve()
+    try:
+        same_git_repository = git_common_dir(recorded_repo) == common
+    except (WatcherError, OSError):
+        same_git_repository = False
+    if recorded_repo != repo.resolve() and not same_git_repository:
+        raise WatcherError("repair run ledger belongs to a different run or repository")
+    return state
+
+
+def load_repair_run_state(repo: Path, run_id: str) -> dict[str, Any]:
     try:
         uuid.UUID(run_id)
     except ValueError as exc:
@@ -632,13 +699,8 @@ def repair_run_state(repo: Path, run_id: str) -> dict[str, Any]:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         raise WatcherError("repair run ledger is missing or invalid") from exc
-    recorded_repo = Path(state.get("repository", "")).resolve()
-    try:
-        same_git_repository = git_common_dir(recorded_repo) == common
-    except (WatcherError, OSError):
-        same_git_repository = False
-    if state.get("run_id") != run_id or (recorded_repo != repo.resolve() and not same_git_repository):
-        raise WatcherError("repair run ledger belongs to a different run or repository")
+    if state.get("run_id") != run_id:
+        raise WatcherError("repair run ledger belongs to a different run")
     return state
 
 

@@ -73,7 +73,8 @@ class IssueWatcherTests(unittest.TestCase):
         state.parent.mkdir(parents=True)
         state.write_text(json.dumps({
             "run_id": run_id, "repository": str(self.repo.resolve()), "base_sha": base,
-            "state": "AWAIT_PUBLICATION_APPROVAL",
+            "source_url": self.issue()["url"], "state": "AWAIT_PUBLICATION_APPROVAL",
+            "receipts": {"commit": {"kind": "commit", "value": head}},
         }), encoding="utf-8")
         return {"run_id": run_id, "worktree_path": str(worktree), "branch": branch,
                 "base_sha": base, "head_sha": head}
@@ -460,7 +461,7 @@ class IssueWatcherTests(unittest.TestCase):
             ledger.retry(self.issue()["url"], self.repo, True)
         self.assertTrue(worktree.exists())
 
-    def test_explicit_accept_merges_recorded_head_and_cleans_worktree(self) -> None:
+    def test_explicit_accept_closes_issue_and_retries_after_close_failure(self) -> None:
         ledger = self.ledger()
         ledger.enqueue(self.issue())
         claimed = ledger.claim_next()
@@ -486,10 +487,60 @@ class IssueWatcherTests(unittest.TestCase):
         evidence = self.repair_evidence(worktree, branch, base, head)
         ledger.finish(claimed["node_id"], claimed["attempt_number"], "ready-for-review",
                       summary="review me", **evidence)
-        result = ledger.accept(self.issue()["url"], self.repo, "main")
+        with mock.patch.object(
+            WATCHER, "close_github_issue",
+            side_effect=[WATCHER.WatcherError("close failed"), None],
+        ) as close_issue:
+            with self.assertRaisesRegex(WATCHER.WatcherError, "close failed"):
+                ledger.accept(self.issue()["url"], self.repo, "main")
+            self.assertTrue(worktree.exists())
+            self.assertEqual("ready-for-review", ledger.snapshot()["issues"][0]["status"])
+            result = ledger.accept(self.issue()["url"], self.repo, "main")
         self.assertEqual("accepted", result["status"])
+        self.assertEqual("closed", result["issue"])
+        self.assertEqual(2, close_issue.call_count)
+        close_issue.assert_called_with(self.issue()["url"])
         self.assertTrue((self.repo / "fixed.txt").is_file())
         self.assertFalse(worktree.exists())
+        self.assertEqual("accepted", ledger.snapshot()["issues"][0]["status"])
+
+    def test_accept_recovers_when_recorded_head_was_already_merged(self) -> None:
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        base = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+        worktree = self.root / "merged-before-accept"
+        branch = "repair/issue-1-attempt-1"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True, stdout=subprocess.PIPE,
+        )
+        (worktree / "fixed.txt").write_text("fixed\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(worktree), "add", "fixed.txt"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "commit", "-m", "fix"], check=True,
+                       stdout=subprocess.PIPE)
+        head = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"], check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+        evidence = self.repair_evidence(worktree, branch, base, head)
+        ledger.finish(claimed["node_id"], claimed["attempt_number"], "ready-for-review",
+                      summary="already merged", **evidence)
+        subprocess.run(["git", "-C", str(self.repo), "merge", "--no-ff", "--no-edit", head],
+                       check=True, stdout=subprocess.PIPE)
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "remove", str(worktree)],
+                       check=True, stdout=subprocess.PIPE)
+
+        with mock.patch.object(WATCHER, "close_github_issue") as close_issue:
+            result = ledger.accept(self.issue()["url"], self.repo, "main")
+
+        self.assertEqual("accepted", result["status"])
+        self.assertEqual("closed", result["issue"])
+        self.assertIn("cleanup_warning", result)
+        close_issue.assert_called_once_with(self.issue()["url"])
         self.assertEqual("accepted", ledger.snapshot()["issues"][0]["status"])
 
 

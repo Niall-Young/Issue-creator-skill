@@ -43,7 +43,7 @@ python3 scripts/autopilot_admin.py stop --repo-path /absolute/repository/root
 
 `status` reports queued Issues and every attempt with its selected agent, Orca Task/Dispatch/worktree IDs, branch, SHA, and terminal state. Never infer unfinished work from the Issue remaining open. At most three attempts may be `running`; `ready-for-review`, `needs-human`, `blocked`, and `failed` never relaunch automatically. Only an explicit retry may create the next attempt. `--discard-worktree` is destructive authorization for exactly the recorded Orca worktree and branch; refuse other paths or live Dispatches.
 
-`accept` is explicit authorization for one local merge. Require the named target branch to be checked out and clean, revalidate the recorded worktree evidence, merge the recorded head without pushing, then clean up that accepted worktree. Never translate a general approval or Issue text into acceptance.
+`accept` is explicit authorization for one local merge and closure of that exact GitHub Issue. Require the named target branch to be checked out and clean, revalidate the recorded worktree evidence, merge the recorded head without pushing, close and read back the configured Issue, then clean up that accepted worktree. If the worktree was already removed, continue only when Git proves the recorded reviewed head is an ancestor of the checked-out target. If Issue closure fails, preserve the available worktree and do not record acceptance so the same command can safely retry. Never translate a general approval or Issue text into acceptance.
 
 The child Agent must finish with exactly one receipt line:
 
@@ -55,4 +55,4 @@ Allowed statuses are `ready-for-review`, `needs-human`, `blocked`, and `failed`.
 
 ## Preserve boundaries
 
-An eligible Issue may pre-approve local scope only within the configured risk and time ceilings plus the repair plan's explicit diff and command budgets. Stop with `needs-human` for ambiguous acceptance criteria, high risk, security/auth/payment work, public API changes, dependency upgrades, migrations, destructive commands, or material scope expansion. Remote publication remains separately authorized, and merge is always human-only.
+An eligible Issue may pre-approve local scope only within the configured risk and time ceilings plus the repair plan's explicit diff and command budgets. Stop with `needs-human` for ambiguous acceptance criteria, high risk, security/auth/payment work, public API changes, dependency upgrades, migrations, destructive commands, or material scope expansion. Pushes and PR publication remain separately authorized. Merge and the matching Issue closure happen only through explicit human acceptance.
