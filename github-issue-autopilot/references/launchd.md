@@ -43,8 +43,6 @@ launchctl kickstart -k gui/$(id -u)/com.example.github-issue-autopilot
 
 Inspect the watcher with `status`, `orca worktree ps --json`, and `orca orchestration task-list --json`. The administrator copies its deterministic runtime scripts outside Desktop so launchd does not need direct background access to a TCC-protected checkout. To stop it without deleting state, use `autopilot_admin.py stop`; it unloads launchd and closes only the exact coordinator terminal.
 
-Run administrator-level `doctor` to inspect the watcher and the scheduled loop together. It reads the repository-specific plist, compares it with the installed configuration, and checks `launchctl` load state. A missing, invalid, or drifted plist, or an unloaded/stopped LaunchAgent, makes `ok` false and appears under `launch_agent.errors`; the check never loads, restarts, or rewrites the service.
-
 ```sh
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.example.github-issue-autopilot.plist
 ```

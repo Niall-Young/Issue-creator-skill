@@ -784,14 +784,13 @@ def list_issues(repository: dict[str, Any], login: str, created_after: dt.dateti
         raise WatcherError(result.stderr.strip() or f"failed to list Issues for {slug}")
     values = json.loads(result.stdout)
     labels = set(repository.get("labels", []))
-    activation = repository["activate_after"]
-    lower = created_after or activation
+    lower = created_after or repository["activate_after"]
     eligible = []
     for issue in values:
         created = parse_time(issue["createdAt"])
         actual_labels = {item.get("name") for item in issue.get("labels", [])}
         if ((issue.get("author") or {}).get("login", "").lower() == author.lower()
-                and labels.issubset(actual_labels) and created > activation and created >= lower
+                and labels.issubset(actual_labels) and created > lower
                 and (created_through is None or created <= created_through)):
             issue["repository"] = slug
             eligible.append(issue)
@@ -1149,48 +1148,45 @@ def main() -> int:
     args = parser().parse_args()
     try:
         config = load_config(args.config)
+        ledger = Ledger(config["state_db"], config["lease_timeout_seconds"], int(config.get("max_attempts", 2)))
         if args.command_name == "doctor":
             result, code = doctor(config), 0
             code = 0 if result["ok"] else 2
+        elif args.command_name == "status":
+            result, code = ledger.snapshot(), 0
+        elif args.command_name == "retry":
+            repository = repository_for_issue(config, args.issue_url)
+            number = ledger.retry(args.issue_url, repository["repo_path"], args.discard_worktree,
+                                  config["orca"]["cli"])
+            result, code = {"status": "retry-pending", "url": args.issue_url, "next_attempt": number}, 0
+        elif args.command_name == "accept":
+            repository = repository_for_issue(config, args.issue_url)
+            result, code = ledger.accept(args.issue_url, repository["repo_path"], args.target_branch,
+                                         config["orca"]["cli"]), 0
+        elif args.command_name == "poll":
+            result, code = poll(config, ledger), 0
+        elif args.command_name == "work":
+            run_id = ensure_orca_run(config, ledger)
+            result, code = {"completed": reconcile_workers(config, ledger),
+                            "started": work_available(config, ledger, run_id)}, 0
+        elif args.command_name == "once":
+            run_id = ensure_orca_run(config, ledger)
+            result, code = {"detection": poll(config, ledger),
+                            "completed": reconcile_workers(config, ledger)}, 0
+            result["started"] = work_available(config, ledger, run_id)
         else:
-            ledger = Ledger(config["state_db"], config["lease_timeout_seconds"],
-                            int(config.get("max_attempts", 2)))
-            if args.command_name == "status":
-                result, code = ledger.snapshot(), 0
-            elif args.command_name == "retry":
-                repository = repository_for_issue(config, args.issue_url)
-                number = ledger.retry(args.issue_url, repository["repo_path"], args.discard_worktree,
-                                      config["orca"]["cli"])
-                result, code = {"status": "retry-pending", "url": args.issue_url,
-                                "next_attempt": number}, 0
-            elif args.command_name == "accept":
-                repository = repository_for_issue(config, args.issue_url)
-                result, code = ledger.accept(args.issue_url, repository["repo_path"], args.target_branch,
-                                             config["orca"]["cli"]), 0
-            elif args.command_name == "poll":
-                result, code = poll(config, ledger), 0
-            elif args.command_name == "work":
-                run_id = ensure_orca_run(config, ledger)
-                result, code = {"completed": reconcile_workers(config, ledger),
-                                "started": work_available(config, ledger, run_id)}, 0
-            elif args.command_name == "once":
-                run_id = ensure_orca_run(config, ledger)
-                result, code = {"detection": poll(config, ledger),
-                                "completed": reconcile_workers(config, ledger)}, 0
-                result["started"] = work_available(config, ledger, run_id)
-            else:
-                run_id = None
-                while True:
-                    try:
-                        run_id = run_id or ensure_orca_run(config, ledger)
-                        value = {"detection": poll(config, ledger),
-                                 "completed": reconcile_workers(config, ledger)}
-                        value["started"] = work_available(config, ledger, run_id)
-                        print(json.dumps(value, ensure_ascii=False), flush=True)
-                    except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
-                        print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False),
-                              file=sys.stderr, flush=True)
-                    time.sleep(config["poll_interval_seconds"])
+            run_id = None
+            while True:
+                try:
+                    run_id = run_id or ensure_orca_run(config, ledger)
+                    value = {"detection": poll(config, ledger),
+                             "completed": reconcile_workers(config, ledger)}
+                    value["started"] = work_available(config, ledger, run_id)
+                    print(json.dumps(value, ensure_ascii=False), flush=True)
+                except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
+                    print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False),
+                          file=sys.stderr, flush=True)
+                time.sleep(config["poll_interval_seconds"])
     except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
