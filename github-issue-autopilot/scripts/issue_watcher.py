@@ -943,7 +943,9 @@ def doctor(config: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"gh": shutil.which("gh") is not None,
         "orca": Path(config["orca"]["cli"]).is_file() and os.access(config["orca"]["cli"], os.X_OK),
         "repositories": []}
-    result["gh_auth"] = result["gh"] and command(["gh", "auth", "status"]).returncode == 0
+    result["gh_auth"] = result["gh"] and command(
+        ["gh", "api", "user", "--silent"]
+    ).returncode == 0
     result["orca_runtime"] = False
     if result["orca"]:
         try:

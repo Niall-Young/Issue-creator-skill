@@ -185,14 +185,15 @@ def install(repo_path: Path, label: str, default_agent: str, allowed_agents: lis
     if sys.platform != "darwin":
         raise AdminError("automatic installation currently requires macOS launchd")
     repo = repository_root(repo_path)
-    if command(["gh", "auth", "status"]).returncode:
+    login_result = command(["gh", "api", "user", "--jq", ".login"])
+    if login_result.returncode:
         raise AdminError("GitHub CLI is not authenticated")
     orca = shutil.which("orca")
     if not orca:
         raise AdminError("Orca CLI was not found")
     allowed_agents = list(dict.fromkeys([default_agent, *allowed_agents]))
     metadata = repository_metadata(repo)
-    login = checked(["gh", "api", "user", "--jq", ".login"])
+    login = login_result.stdout.strip()
     paths = build_paths(metadata["id"])
     activated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
     config = build_config(repo, metadata, login, str(Path(orca).resolve()), label, paths, activated_at,
