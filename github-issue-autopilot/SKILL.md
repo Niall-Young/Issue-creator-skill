@@ -45,7 +45,7 @@ python3 scripts/autopilot_admin.py stop --repository owner/repo
 python3 scripts/autopilot_admin.py uninstall --repository-id REPOSITORY_ID
 ```
 
-`status` reports queued Issues and every attempt with its selected agent, Orca Task/Dispatch/worktree IDs, branch, SHA, and terminal state. Never infer unfinished work from the Issue remaining open. At most three attempts may be `running`; `ready-for-review`, `needs-human`, `blocked`, and `failed` never relaunch automatically. Only an explicit retry may create the next attempt. `--discard-worktree` is destructive authorization for exactly the recorded Orca worktree and branch; refuse other paths or live Dispatches.
+`status` reports queued Issues and every attempt with its selected agent, Orca Task/Dispatch/worktree IDs, branch, SHA, and terminal state. At most three attempts may be `running`. A `failed` attempt whose Issue remains open and eligible is queued again on the next poll until `max_attempts` is reached; the default total is two attempts. `ready-for-review`, explicit `needs-human`, and policy `blocked` results never relaunch automatically. An explicit retry may continue beyond the automatic limit. `--discard-worktree` is destructive authorization for exactly the recorded Orca worktree and branch; refuse other paths or live Dispatches.
 
 For an Issue already in the ledger, an abandoned or unsatisfactory result must remain immutable history and continue only through `retry`. The coordinator must then create a new Orca child worktree for that Issue; Orca unavailability, incomplete evidence, or reuse of any historical or cross-Issue identity stops at `needs-human` without a manual fallback.
 
@@ -63,7 +63,7 @@ The child Agent must finish with exactly one receipt line:
 AUTOPILOT_RESULT: {"status":"ready-for-review","summary":"verified local result","run_id":"...","worktree_path":"/absolute/path","branch":"...","base_sha":"...","head_sha":"..."}
 ```
 
-Allowed statuses are `ready-for-review`, `needs-human`, `blocked`, and `failed`. The worker must send Orca `worker_done`, and its final transcript must contain the receipt above. Success is downgraded to `needs-human` unless Git confirms every recorded artifact. A missing receipt is also `needs-human`. Preserve failed worktrees and Orca output until the user inspects or explicitly discards them.
+Allowed statuses are `ready-for-review`, `needs-human`, `blocked`, and `failed`. The worker must send Orca `worker_done`, and its final transcript must contain the receipt above. A missing or malformed receipt is `failed` and may receive the bounded automatic retry. A success receipt with mismatched identity or unverifiable Git evidence is `needs-human`, as are explicit worker requests for human judgment. Preserve failed worktrees and Orca output until the user inspects or explicitly discards them.
 
 ## Preserve boundaries
 

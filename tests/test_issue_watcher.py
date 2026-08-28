@@ -227,6 +227,73 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertIsNone(ledger.claim_next())
         self.assertEqual("ready-for-review", ledger.snapshot()["issues"][0]["status"])
 
+    def test_failed_open_issue_requeues_once_up_to_automatic_attempt_limit(self) -> None:
+        ledger = self.ledger(attempts=2)
+        issue = self.issue()
+        self.assertTrue(ledger.enqueue(issue))
+        first = ledger.claim_next()
+        ledger.finish(first["node_id"], first["attempt_number"], "failed",
+                      summary="worker stopped")
+
+        self.assertTrue(ledger.enqueue(issue))
+        second = ledger.claim_next()
+        self.assertEqual(2, second["attempt_number"])
+        ledger.finish(second["node_id"], second["attempt_number"], "failed",
+                      summary="worker stopped again")
+
+        self.assertFalse(ledger.enqueue(issue))
+        self.assertIsNone(ledger.claim_next())
+        snapshot = ledger.snapshot()["issues"][0]
+        self.assertEqual("failed", snapshot["status"])
+        self.assertEqual(["failed", "failed"],
+                         [attempt["status"] for attempt in snapshot["attempt_history"]])
+
+        self.assertEqual(3, ledger.retry(issue["url"], self.repo, False))
+        self.assertEqual(3, ledger.claim_next()["attempt_number"])
+
+    def test_next_poll_requeues_failed_issue_that_remains_open_and_eligible(self) -> None:
+        config, ledger = self.config(), self.ledger(attempts=2)
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        ledger.finish(claimed["node_id"], claimed["attempt_number"], "failed",
+                      summary="worker stopped")
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), \
+                mock.patch.object(WATCHER, "list_issues", return_value=[eligible]):
+            detection = WATCHER.poll(config, ledger)
+
+        self.assertEqual({"observed": 1, "enqueued": 1}, detection)
+        self.assertEqual(2, ledger.claim_next()["attempt_number"])
+
+    def test_review_and_human_stops_do_not_requeue_when_issue_stays_open(self) -> None:
+        for status in ("ready-for-review", "needs-human", "blocked"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                ledger = WATCHER.Ledger(Path(temporary) / "state.sqlite3",
+                                        lease_seconds=20, max_attempts=2)
+                issue = self.issue()
+                ledger.enqueue(issue)
+                claimed = ledger.claim_next()
+                ledger.finish(claimed["node_id"], claimed["attempt_number"], status,
+                              summary="wait for a person")
+                self.assertFalse(ledger.enqueue(issue))
+                self.assertIsNone(ledger.claim_next())
+
+    def test_overlapping_failed_issue_scans_only_requeue_once(self) -> None:
+        first = self.ledger(attempts=2)
+        second = self.ledger(attempts=2)
+        issue = self.issue()
+        first.enqueue(issue)
+        claimed = first.claim_next()
+        first.finish(claimed["node_id"], claimed["attempt_number"], "failed",
+                     summary="worker stopped")
+
+        self.assertTrue(first.enqueue(issue))
+        self.assertFalse(second.enqueue(issue))
+        self.assertEqual(2, second.claim_next()["attempt_number"])
+        self.assertIsNone(first.claim_next())
+
     def test_overlapping_claims_only_return_one_run(self) -> None:
         first = self.ledger()
         second = self.ledger()
@@ -689,23 +756,24 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("ready-for-review", completed[0]["status"], completed)
         self.assertEqual("ready-for-review", ledger.snapshot()["issues"][0]["status"])
 
-    def test_completed_worker_records_missing_colon_diagnostic(self) -> None:
+    def test_completed_worker_with_invalid_receipt_is_retryable_failure(self) -> None:
         completed, attempt = self.reconcile_invalid_output(
             'AUTOPILOT_RESULT {"status":"needs-human","summary":"scope expanded"}',
             {"result": {"dispatch": {"status": "completed", "outcome": "succeeded"}}},
         )
-        self.assertEqual("needs-human", completed["status"])
+        self.assertEqual("failed", completed["status"])
         self.assertIn("missing required colon", completed["summary"])
+        self.assertEqual("failed", attempt["status"])
         self.assertIn("missing required colon", attempt["summary"])
 
-    def test_stalled_worker_with_invalid_json_receipt_finishes_needs_human(self) -> None:
+    def test_stalled_worker_with_invalid_json_receipt_is_retryable_failure(self) -> None:
         completed, attempt = self.reconcile_invalid_output(
             "AUTOPILOT_RESULT: {not-json}",
             {"result": {"dispatch": {"status": "failed", "lastError": "agent_prompt_stalled"}}},
         )
-        self.assertEqual("needs-human", completed["status"])
+        self.assertEqual("failed", completed["status"])
         self.assertIn("invalid JSON", completed["summary"])
-        self.assertEqual("needs-human", attempt["status"])
+        self.assertEqual("failed", attempt["status"])
         self.assertIn("invalid JSON", attempt["summary"])
 
     def test_load_config_accepts_config_without_activation_cutoff(self) -> None:
@@ -720,6 +788,17 @@ class IssueWatcherTests(unittest.TestCase):
         }), encoding="utf-8")
         loaded = WATCHER.load_config(path)
         self.assertNotIn("activate_after", loaded["repositories"][0])
+
+    def test_load_config_requires_positive_automatic_attempt_limit(self) -> None:
+        config = self.config()
+        config["max_attempts"] = 0
+        config["state_db"] = str(config["state_db"])
+        config["repositories"][0]["repo_path"] = str(self.repo)
+        path = self.root / "config.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+
+        with self.assertRaisesRegex(WATCHER.WatcherError, "max_attempts must be positive"):
+            WATCHER.load_config(path)
 
     def doctor_with_orca_cli(self, executable: str) -> dict:
         config = self.config()

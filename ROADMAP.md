@@ -26,7 +26,7 @@
 - 协调器负责确定性的状态、依赖、预算、审批和恢复；Agent 只承担有边界的规划、实施与审查角色。
 - worker 使用隔离 worktree，不接触远程写凭据，也不修改用户正在使用的工作树。
 - 自动化可以准备证据和 draft PR，但 MVP 不自动合并、关闭 Issue、评论、打标签、发布或部署。
-- 每轮扫描当前全部符合作者与标签策略的 open Issue，包括自动化启用前创建的积压任务；自动任务以 GitHub Issue node ID 幂等识别，Issue 编辑、后补标签、重新打开或保持 open 都不会自动重跑。
+- 每轮扫描当前全部符合作者与标签策略的 open Issue，包括自动化启用前创建的积压任务；自动任务以 GitHub Issue node ID 幂等识别，Issue 编辑、后补标签或重新打开不会重复派发，而失败任务在仍 open 且符合策略时会于下一轮在 `max_attempts` 上限内续做。
 
 ### 分阶段计划
 
@@ -75,7 +75,7 @@
 已完成的单机基础：
 
 - `github-issue-autopilot` 可为当前仓库安装原生 Orca Automation，用 `gh` 只读轮询并按作者、open 状态与 `agent-ready` 标签筛选。
-- SQLite WAL 账本用 node ID 去重并为每次 worktree 保存独立 attempt；事务领取与 Orca Task/Dispatch/worktree 标识阻止重复 worker，失败任务停在可见的 `needs-human` 而非盲目重派。
+- SQLite WAL 账本用 node ID 去重并为每次 worktree 保存独立 attempt；事务领取与 Orca Task/Dispatch/worktree 标识阻止重复 worker。未完成的 `failed` 任务若仍 open 且符合策略，会在下一轮于默认两次总上限内续做；`needs-human` 与 `blocked` 停下来等待人工判断。
 - 成功 attempt 以 Git 回读验证 Orca worktree、记录分支和 base/head SHA 后进入 `ready-for-review`；人工可明确验收，在本地合并成功后关闭并回读对应 Issue，或舍弃精确记录的 Orca worktree 后创建新 attempt。
 - 符合策略的 Issue 只预授权一个低/中风险本地工作包；远程发布固定为 `never`，merge 始终由人完成。
 - Orca Automation 每三分钟预检协调器终端，只在缺失时调用 Agent 恢复；协调器一次记录全部合格 Issue，并维持最多三个可见 worker。GUI 暂停会让协调器退出，但不会强制终止已经派出的 worker。无有效 `worker_done` 与 `AUTOPILOT_RESULT` 回执不得判定成功。
@@ -137,7 +137,7 @@ The repository now includes all three Skills, the work-package contract, approva
 - A deterministic coordinator owns state, dependencies, budgets, approvals, and recovery. Agents perform bounded planning, implementation, and review roles.
 - Workers use isolated worktrees, receive no remote-write credentials, and never modify the user's active working tree.
 - Automation may prepare evidence and draft PRs, but the MVP never merges, closes Issues, comments, labels, releases, or deploys automatically.
-- Every poll scans all currently open Issues matching the author and label policy, including backlog created before automation was enabled. Automatic jobs are idempotent by immutable GitHub Issue node ID; edits, later labels, reopened Issues, or remaining open do not retrigger work.
+- Every poll scans all currently open Issues matching the author and label policy, including backlog created before automation was enabled. Automatic jobs remain idempotent by immutable GitHub Issue node ID: edits, later labels, and reopening do not duplicate dispatch, while a failed job that remains open and eligible continues on the next cycle within `max_attempts`.
 
 ### Phased Plan
 
@@ -184,7 +184,7 @@ Exit criterion: remote actions are traceable and resumable without duplicate PRs
 Implemented single-machine foundation:
 
 - `github-issue-autopilot` can install a repository-specific native Orca Automation, performs read-only `gh` polling, and filters the complete open-Issue set by author and the `agent-ready` label.
-- A SQLite WAL ledger deduplicates by node ID and records each worktree as a separate attempt. Transactional claims plus Orca Task/Dispatch/worktree identities block duplicate workers; failures stop visibly at `needs-human` instead of relaunching blindly.
+- A SQLite WAL ledger deduplicates by node ID and records each worktree as a separate attempt. Transactional claims plus Orca Task/Dispatch/worktree identities block duplicate workers. An unfinished `failed` job that remains open and eligible continues on the next cycle within the default two-attempt total, while `needs-human` and `blocked` stop for human judgment.
 - A successful attempt becomes `ready-for-review` only after Git validates its Orca worktree, recorded branch, and base/head SHAs. A human can explicitly accept it, closing and reading back the matching Issue after a successful local merge, or discard the exact Orca worktree before creating another attempt.
 - An eligible Issue pre-authorizes only one low/medium-risk local work package. Remote publication is fixed to `never`, and merge remains human-only.
 - Orca Automation prechecks the coordinator every three minutes and invokes an Agent only when recovery is needed. The coordinator records every eligible Issue and maintains up to three visible workers. Pausing in the GUI exits the coordinator without forcibly stopping dispatched workers; neither missing `worker_done` nor a missing `AUTOPILOT_RESULT` can be reported as success.

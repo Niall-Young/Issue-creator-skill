@@ -124,6 +124,9 @@ def load_config(path: Path) -> dict[str, Any]:
         raise WatcherError("lease_timeout_seconds must be positive")
     config["lease_timeout_seconds"] = lease
     config["poll_interval_seconds"] = max(1, int(config.get("poll_interval_seconds", 180)))
+    config["max_attempts"] = int(config.get("max_attempts", 2))
+    if config["max_attempts"] < 1:
+        raise WatcherError("max_attempts must be positive")
     config["max_concurrent_workers"] = max(1, min(3, int(config.get("max_concurrent_workers", 3))))
     policy = config.get("policy", {})
     if policy.get("scope_approval") != "eligible-issue":
@@ -149,7 +152,7 @@ class Ledger:
     def __init__(self, path: Path, lease_seconds: int, max_attempts: int = 2) -> None:
         self.path = path
         self.lease_seconds = lease_seconds
-        self.max_attempts = max_attempts  # compatible with v1 configs; retries are now explicit
+        self.max_attempts = max_attempts
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path, timeout=30, isolation_level=None)
         self.connection.row_factory = sqlite3.Row
@@ -239,6 +242,21 @@ class Ledger:
             )
             if cursor.rowcount:
                 self._event(issue["id"], "discovered", {"url": issue["url"]})
+            else:
+                cursor = self.connection.execute(
+                    """UPDATE issues SET status='retry-pending', title=?, issue_updated_at=?,
+                       lease_started_at=NULL, lease_owner=NULL, pid=NULL, summary=NULL,
+                       returncode=NULL, log_path=NULL
+                       WHERE node_id=? AND status='failed' AND attempts < ?""",
+                    (issue.get("title", ""), issue["updatedAt"], issue["id"], self.max_attempts),
+                )
+                if cursor.rowcount:
+                    self._event(issue["id"], "automatic_retry_queued", {
+                        "attempts": int(self.connection.execute(
+                            "SELECT attempts FROM issues WHERE node_id=?", (issue["id"],)
+                        ).fetchone()[0]),
+                        "max_attempts": self.max_attempts,
+                    })
             self.connection.execute("COMMIT")
             return bool(cursor.rowcount)
         except Exception:
@@ -941,7 +959,7 @@ def invalid_receipt_summary(output: str) -> str:
 def verified_receipt(receipt: dict[str, Any] | None, repository: dict[str, Any],
                      run: dict[str, Any], output: str = "") -> tuple[str, str, dict[str, Any]]:
     if receipt is None:
-        return "needs-human", invalid_receipt_summary(output), {}
+        return "failed", invalid_receipt_summary(output), {}
     status = "ready-for-review" if receipt["status"] in {"succeeded", "ready-for-review"} else receipt["status"]
     identity = {key: receipt.get(key) for key in ("run_id", "worktree_path", "branch")}
     expected = {key: run.get(key) for key in identity}
