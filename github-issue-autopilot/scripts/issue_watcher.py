@@ -453,7 +453,11 @@ def pid_alive(pid: int) -> bool:
 
 
 def command(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, cwd=cwd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    environment = os.environ.copy()
+    if Path(argv[0]).name == "gh":
+        environment.setdefault("GODEBUG", "http2client=0")
+    return subprocess.run(argv, cwd=cwd, env=environment, check=False, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def json_command(argv: list[str], cwd: Path | None = None) -> dict[str, Any]:
