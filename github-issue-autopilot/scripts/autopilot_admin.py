@@ -237,7 +237,98 @@ def run_watcher(repo_path: Path, operation: str, extra: list[str] | None = None)
     info = marker(repo_path)
     watcher = Path(__file__).resolve().with_name("issue_watcher.py")
     argv = [sys.executable, str(watcher), operation, "--config", info["config"], *(extra or [])]
-    return json.loads(checked(argv))
+    result = command(argv)
+    try:
+        watcher_result = json.loads(result.stdout or result.stderr)
+    except json.JSONDecodeError as exc:
+        raise AdminError(result.stderr.strip() or result.stdout.strip() or "watcher returned invalid JSON") from exc
+    if result.returncode and operation != "doctor":
+        raise AdminError((watcher_result.get("error") if isinstance(watcher_result, dict) else None)
+                         or result.stderr.strip() or "watcher command failed")
+    if not isinstance(watcher_result, dict) or watcher_result.get("status") == "error":
+        raise AdminError(watcher_result.get("error", "watcher command failed")
+                         if isinstance(watcher_result, dict)
+                         else "watcher returned invalid JSON")
+    return watcher_result
+
+
+def launchctl_arguments(output: str) -> list[str]:
+    arguments: list[str] = []
+    reading = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped == "arguments = {":
+            reading = True
+        elif reading and stripped == "}":
+            break
+        elif reading and stripped:
+            arguments.append(stripped)
+    return arguments
+
+
+def loaded_launch_agent_matches(output: str, expected: dict[str, Any]) -> bool:
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        stripped = line.strip()
+        if " = " in stripped:
+            key, value = stripped.split(" = ", 1)
+            values[key] = value
+    properties = {item.strip() for item in values.get("properties", "").split("|")}
+    return (
+        launchctl_arguments(output) == expected["ProgramArguments"]
+        and values.get("run interval") == f"{expected['StartInterval']} seconds"
+        and values.get("stdout path") == expected["StandardOutPath"]
+        and values.get("stderr path") == expected["StandardErrorPath"]
+        and ("runatload" in properties) == bool(expected["RunAtLoad"])
+    )
+
+
+def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
+    paths = build_paths(info["repository_id"])
+    plist_path = Path(paths["plist"])
+    config_path = Path(info["config"])
+    health: dict[str, Any] = {
+        "ok": False,
+        "label": paths["launch_label"],
+        "plist": str(plist_path),
+        "plist_exists": plist_path.is_file(),
+        "configuration_matches": False,
+        "loaded": False,
+        "loaded_configuration_matches": False,
+        "errors": [],
+    }
+    expected: dict[str, Any] | None = None
+    if health["plist_exists"]:
+        try:
+            actual = plistlib.loads(plist_path.read_bytes())
+            expected = plistlib.loads(build_plist(paths, config_path))
+            health["configuration_matches"] = actual == expected
+        except (OSError, plistlib.InvalidFileException):
+            health["errors"].append("LaunchAgent plist is invalid")
+        if not health["configuration_matches"] and not health["errors"]:
+            health["errors"].append("LaunchAgent plist does not match the installed configuration")
+    else:
+        health["errors"].append("LaunchAgent plist is missing")
+    domain = f"gui/{os.getuid()}"
+    loaded = command(["launchctl", "print", f"{domain}/{paths['launch_label']}"])
+    health["loaded"] = loaded.returncode == 0
+    if not health["loaded"]:
+        health["errors"].append("LaunchAgent is not loaded")
+    elif expected is not None:
+        health["loaded_configuration_matches"] = loaded_launch_agent_matches(loaded.stdout, expected)
+        if not health["loaded_configuration_matches"]:
+            health["errors"].append("Loaded LaunchAgent does not match the installed configuration")
+    health["ok"] = bool(health["plist_exists"] and health["configuration_matches"]
+                        and health["loaded"] and health["loaded_configuration_matches"])
+    return health
+
+
+def doctor(repo_path: Path) -> dict[str, Any]:
+    info = marker(repo_path)
+    result = dict(run_watcher(repo_path, "doctor"))
+    result["launch_agent"] = launch_agent_health(info)
+    result["ok"] = bool(result.get("ok") and result["launch_agent"]["ok"])
+    return result
 
 
 def stop(repo_path: Path) -> dict[str, Any]:
@@ -303,7 +394,9 @@ def main() -> int:
             result = ensure_coordinator(args.config)
         elif args.operation == "stop":
             result = stop(args.repo_path)
-        elif args.operation in {"doctor", "status"}:
+        elif args.operation == "doctor":
+            result = doctor(args.repo_path)
+        elif args.operation == "status":
             result = run_watcher(args.repo_path, args.operation)
         elif args.operation == "retry":
             extra = ["--issue-url", args.issue_url]
@@ -317,7 +410,7 @@ def main() -> int:
         print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    return 2 if args.operation == "doctor" and not result.get("ok") else 0
 
 
 if __name__ == "__main__":
