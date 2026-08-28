@@ -73,6 +73,15 @@ class AutopilotAdminTests(unittest.TestCase):
         self.assertEqual(["claude", "codex"], value["orca"]["allowed_agents"])
         self.assertNotIn("executor", value)
 
+    def test_github_command_retries_transient_eof(self) -> None:
+        failed = subprocess.CompletedProcess(["gh", "api", "user"], 1, "", "request: EOF")
+        succeeded = subprocess.CompletedProcess(["gh", "api", "user"], 0, "owner\n", "")
+        with mock.patch.object(ADMIN.subprocess, "run", side_effect=[failed, succeeded]) as run:
+            result = ADMIN.command(["gh", "api", "user"])
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(2, run.call_count)
+        self.assertEqual("http2client=0", run.call_args.kwargs["env"]["GODEBUG"])
+
 
 if __name__ == "__main__":
     unittest.main()

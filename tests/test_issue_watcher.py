@@ -53,6 +53,15 @@ class IssueWatcherTests(unittest.TestCase):
     def ledger(self, attempts: int = 2) -> object:
         return WATCHER.Ledger(self.db, lease_seconds=20, max_attempts=attempts)
 
+    def test_github_command_retries_transient_eof(self) -> None:
+        failed = subprocess.CompletedProcess(["gh", "api", "user"], 1, "", "request: EOF")
+        succeeded = subprocess.CompletedProcess(["gh", "api", "user"], 0, "owner\n", "")
+        with mock.patch.object(WATCHER.subprocess, "run", side_effect=[failed, succeeded]) as run:
+            result = WATCHER.command(["gh", "api", "user"])
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(2, run.call_count)
+        self.assertEqual("http2client=0", run.call_args.kwargs["env"]["GODEBUG"])
+
     def repair_evidence(self, worktree: Path, branch: str, base: str, head: str) -> dict:
         run_id = str(uuid.uuid4())
         common = subprocess.run(

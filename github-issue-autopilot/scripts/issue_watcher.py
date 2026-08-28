@@ -454,10 +454,16 @@ def pid_alive(pid: int) -> bool:
 
 def command(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
-    if Path(argv[0]).name == "gh":
+    is_github = Path(argv[0]).name == "gh"
+    if is_github:
         environment.setdefault("GODEBUG", "http2client=0")
-    return subprocess.run(argv, cwd=cwd, env=environment, check=False, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    attempts = 3 if is_github else 1
+    for attempt in range(attempts):
+        result = subprocess.run(argv, cwd=cwd, env=environment, check=False, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode == 0 or "EOF" not in result.stderr or attempt == attempts - 1:
+            return result
+    return result
 
 
 def json_command(argv: list[str], cwd: Path | None = None) -> dict[str, Any]:
@@ -1014,11 +1020,17 @@ def main() -> int:
                             "completed": reconcile_workers(config, ledger)}, 0
             result["started"] = work_available(config, ledger, run_id)
         else:
-            run_id = ensure_orca_run(config, ledger)
+            run_id = None
             while True:
-                value = {"detection": poll(config, ledger), "completed": reconcile_workers(config, ledger)}
-                value["started"] = work_available(config, ledger, run_id)
-                print(json.dumps(value, ensure_ascii=False), flush=True)
+                try:
+                    run_id = run_id or ensure_orca_run(config, ledger)
+                    value = {"detection": poll(config, ledger),
+                             "completed": reconcile_workers(config, ledger)}
+                    value["started"] = work_available(config, ledger, run_id)
+                    print(json.dumps(value, ensure_ascii=False), flush=True)
+                except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
+                    print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False),
+                          file=sys.stderr, flush=True)
                 time.sleep(config["poll_interval_seconds"])
     except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)

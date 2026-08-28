@@ -24,10 +24,16 @@ class AdminError(RuntimeError):
 
 def command(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
-    if Path(argv[0]).name == "gh":
+    is_github = Path(argv[0]).name == "gh"
+    if is_github:
         environment.setdefault("GODEBUG", "http2client=0")
-    return subprocess.run(argv, cwd=cwd, env=environment, check=False, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    attempts = 3 if is_github else 1
+    for attempt in range(attempts):
+        result = subprocess.run(argv, cwd=cwd, env=environment, check=False, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode == 0 or "EOF" not in result.stderr or attempt == attempts - 1:
+            return result
+    return result
 
 
 def checked(argv: list[str], cwd: Path | None = None) -> str:
