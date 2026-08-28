@@ -92,7 +92,6 @@ class IssueWatcherTests(unittest.TestCase):
                 "repo_path": self.repo,
                 "author": "@me",
                 "labels": [],
-                "activate_after": dt.datetime(2026, 8, 27, tzinfo=dt.timezone.utc),
             }],
             "orca": {"cli": sys.executable, "default_agent": "codex",
                      "allowed_agents": ["codex", "claude"], "setup": "run"},
@@ -148,7 +147,7 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("needs-human", snapshot["status"])
         self.assertEqual(1, len(snapshot["attempt_history"]))
 
-    def test_issue_filters_apply_author_label_and_activation_time(self) -> None:
+    def test_issue_filters_apply_author_and_label_without_age_cutoff(self) -> None:
         repository = self.config()["repositories"][0]
         repository["labels"] = ["agent-ready"]
         values = [
@@ -164,16 +163,16 @@ class IssueWatcherTests(unittest.TestCase):
         ]
         with mock.patch.object(WATCHER, "command", side_effect=calls):
             eligible = WATCHER.list_issues(repository, "owner")
-        self.assertEqual(["new"], [issue["id"] for issue in eligible])
+        self.assertEqual(["new", "old"], [issue["id"] for issue in eligible])
 
-    def test_issue_filter_replays_cursor_second_without_crossing_activation_cutoff(self) -> None:
+    def test_issue_filter_includes_backlog_through_poll_boundary(self) -> None:
         repository = self.config()["repositories"][0]
         repository["labels"] = ["agent-ready"]
         boundary = dt.datetime(2026, 8, 27, 1, 0, 1, tzinfo=dt.timezone.utc)
         values = [
             {**self.issue("boundary", 1), "createdAt": "2026-08-27T01:00:01Z",
              "author": {"login": "owner"}, "labels": [{"name": "agent-ready"}]},
-            {**self.issue("activation", 2), "createdAt": "2026-08-27T00:00:00Z",
+            {**self.issue("backlog", 2), "createdAt": "2026-08-27T00:00:00Z",
              "author": {"login": "owner"}, "labels": [{"name": "agent-ready"}]},
         ]
         metadata = {"id": "R_1", "nameWithOwner": "owner/repo",
@@ -183,11 +182,12 @@ class IssueWatcherTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, json.dumps(values), ""),
         ]
         with mock.patch.object(WATCHER, "command", side_effect=calls):
-            eligible = WATCHER.list_issues(repository, "owner", created_after=boundary)
-        self.assertEqual(["boundary"], [issue["id"] for issue in eligible])
+            eligible = WATCHER.list_issues(repository, "owner", created_through=boundary)
+        self.assertEqual(["boundary", "backlog"], [issue["id"] for issue in eligible])
 
-    def test_two_poll_boundary_replays_late_issue_and_deduplicates_node_id(self) -> None:
+    def test_repeated_full_scans_include_backlog_and_deduplicate_node_id(self) -> None:
         config, ledger = self.config(), self.ledger()
+        ledger.set_metadata("poll_cursor:owner/repo", "2099-01-01T00:00:00+00:00")
         issue = {**self.issue(), "createdAt": "2026-08-27T01:00:01Z",
                  "author": {"login": "owner"}, "labels": []}
         metadata = {"id": "R_1", "nameWithOwner": "owner/repo",
@@ -206,10 +206,10 @@ class IssueWatcherTests(unittest.TestCase):
         ), mock.patch.object(WATCHER, "command", side_effect=[repo, empty, repo, visible, repo, visible]):
             first = WATCHER.poll(config, ledger)
             second = WATCHER.poll(config, ledger)
-            replay = WATCHER.poll(config, ledger)
+            repeated = WATCHER.poll(config, ledger)
         self.assertEqual(0, first["enqueued"])
         self.assertEqual(1, second["enqueued"])
-        self.assertEqual(0, replay["enqueued"])
+        self.assertEqual(0, repeated["enqueued"])
         self.assertEqual(1, len(ledger.snapshot()["issues"]))
 
     def test_doctor_does_not_initialize_sqlite_ledger(self) -> None:
@@ -261,8 +261,7 @@ class IssueWatcherTests(unittest.TestCase):
         attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
         self.assertEqual("codex", attempt["agent_id"])
         self.assertEqual("dispatch-1", attempt["orca_dispatch_id"])
-        self.assertEqual(dt.datetime.min.replace(tzinfo=dt.timezone.utc),
-                         list_issues.call_args.kwargs["created_after"])
+        self.assertEqual({}, list_issues.call_args.kwargs)
 
     def test_prompt_requires_literal_receipt_prefix_with_one_line_example(self) -> None:
         prompt = WATCHER.prompt_for({
@@ -399,7 +398,7 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("needs-human", attempt["status"])
         self.assertIn("invalid JSON", attempt["summary"])
 
-    def test_load_config_rejects_missing_activation_cutoff(self) -> None:
+    def test_load_config_accepts_config_without_activation_cutoff(self) -> None:
         path = self.root / "config.json"
         path.write_text(json.dumps({
             "schema_version": 2,
@@ -409,8 +408,8 @@ class IssueWatcherTests(unittest.TestCase):
             "orca": {"cli": sys.executable, "default_agent": "codex", "allowed_agents": ["codex"]},
             "lease_timeout_seconds": 20,
         }), encoding="utf-8")
-        with self.assertRaisesRegex(WATCHER.WatcherError, "activate_after"):
-            WATCHER.load_config(path)
+        loaded = WATCHER.load_config(path)
+        self.assertNotIn("activate_after", loaded["repositories"][0])
 
     def doctor_with_orca_cli(self, executable: str) -> dict:
         config = self.config()

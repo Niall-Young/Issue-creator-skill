@@ -13,7 +13,7 @@
 
 - `github-issue-handoff`：把仓库上下文与用户意图交接成 Agent 可执行的 Issue。创建 Issue 不会自动触发代码修改。
 - `github-issue-repair`：读取既有 Issue，提出工作包与验证方案，在获得授权后修改代码，并可在再次授权后发布 draft PR。
-- `github-issue-autopilot`：按可信本地策略自动发现 owner 创建的新 Issue，并在 Orca 可见子 worktree 中调用 repair 工作流。
+- `github-issue-autopilot`：按可信本地策略自动发现 owner 创建的合格 open Issue，并在 Orca 可见子 worktree 中调用 repair 工作流。
 
 三者可以共享 URL 解析、GitHub 读取、仓库上下文采集与结构化 Issue 数据，但必须拥有不同的触发条件、授权边界、状态与成功标准。
 
@@ -26,7 +26,7 @@
 - 协调器负责确定性的状态、依赖、预算、审批和恢复；Agent 只承担有边界的规划、实施与审查角色。
 - worker 使用隔离 worktree，不接触远程写凭据，也不修改用户正在使用的工作树。
 - 自动化可以准备证据和 draft PR，但 MVP 不自动合并、关闭 Issue、评论、打标签、发布或部署。
-- 新部署必须设置 `activate_after`，并在成功轮询后推进游标；自动任务以 GitHub Issue node ID 幂等识别，Issue 编辑、后补标签、重新打开或保持 open 都不会自动重跑。
+- 每轮扫描当前全部符合作者与标签策略的 open Issue，包括自动化启用前创建的积压任务；自动任务以 GitHub Issue node ID 幂等识别，Issue 编辑、后补标签、重新打开或保持 open 都不会自动重跑。
 
 ### 分阶段计划
 
@@ -74,7 +74,7 @@
 
 已完成的单机基础：
 
-- `github-issue-autopilot` 可为当前 macOS 仓库安装独立 LaunchAgent，用 `gh` 只读轮询并按作者、新建游标与 `agent-ready` 标签筛选。
+- `github-issue-autopilot` 可为当前 macOS 仓库安装独立 LaunchAgent，用 `gh` 只读轮询并按作者、open 状态与 `agent-ready` 标签筛选。
 - SQLite WAL 账本用 node ID 去重并为每次 worktree 保存独立 attempt；事务领取与 Orca Task/Dispatch/worktree 标识阻止重复 worker，失败任务停在可见的 `needs-human` 而非盲目重派。
 - 成功 attempt 以 Git 回读验证 Orca worktree、记录分支和 base/head SHA 后进入 `ready-for-review`；人工可明确验收，在本地合并成功后关闭并回读对应 Issue，或舍弃精确记录的 Orca worktree 后创建新 attempt。
 - 符合策略的 Issue 只预授权一个低/中风险本地工作包；远程发布固定为 `never`，merge 始终由人完成。
@@ -137,7 +137,7 @@ The repository now includes all three Skills, the work-package contract, approva
 - A deterministic coordinator owns state, dependencies, budgets, approvals, and recovery. Agents perform bounded planning, implementation, and review roles.
 - Workers use isolated worktrees, receive no remote-write credentials, and never modify the user's active working tree.
 - Automation may prepare evidence and draft PRs, but the MVP never merges, closes Issues, comments, labels, releases, or deploys automatically.
-- New deployments require `activate_after` and advance a cursor after each successful poll. Automatic jobs are idempotent by immutable GitHub Issue node ID; edits, later labels, reopened Issues, or remaining open do not retrigger work.
+- Every poll scans all currently open Issues matching the author and label policy, including backlog created before automation was enabled. Automatic jobs are idempotent by immutable GitHub Issue node ID; edits, later labels, reopened Issues, or remaining open do not retrigger work.
 
 ### Phased Plan
 
@@ -183,7 +183,7 @@ Exit criterion: remote actions are traceable and resumable without duplicate PRs
 
 Implemented single-machine foundation:
 
-- `github-issue-autopilot` can install a repository-specific macOS LaunchAgent, performs read-only `gh` polling, and filters by author, new-Issue cursor, and the `agent-ready` label.
+- `github-issue-autopilot` can install a repository-specific macOS LaunchAgent, performs read-only `gh` polling, and filters the complete open-Issue set by author and the `agent-ready` label.
 - A SQLite WAL ledger deduplicates by node ID and records each worktree as a separate attempt. Transactional claims plus Orca Task/Dispatch/worktree identities block duplicate workers; failures stop visibly at `needs-human` instead of relaunching blindly.
 - A successful attempt becomes `ready-for-review` only after Git validates its Orca worktree, recorded branch, and base/head SHAs. A human can explicitly accept it, closing and reading back the matching Issue after a successful local merge, or discard the exact Orca worktree before creating another attempt.
 - An eligible Issue pre-authorizes only one low/medium-risk local work package. Remote publication is fixed to `never`, and merge remains human-only.

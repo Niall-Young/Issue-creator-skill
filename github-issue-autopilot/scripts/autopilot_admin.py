@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import hashlib
 import json
 import os
@@ -110,7 +109,7 @@ def build_paths(repository_id: str) -> dict[str, Path | str]:
 
 
 def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, label: str,
-                 paths: dict[str, Path | str], activated_at: str, default_agent: str,
+                 paths: dict[str, Path | str], default_agent: str,
                  allowed_agents: list[str]) -> dict[str, Any]:
     return {
         "schema_version": 2,
@@ -122,7 +121,7 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
         "policy": {"scope_approval": "eligible-issue", "publication": "never", "max_risk": "medium"},
         "repositories": [{
             "repository": metadata["nameWithOwner"], "repository_id": metadata["id"],
-            "repo_path": str(repo), "author": login, "activate_after": activated_at, "labels": [label],
+            "repo_path": str(repo), "author": login, "labels": [label],
         }],
         "orca": {"cli": orca, "default_agent": default_agent,
                  "allowed_agents": allowed_agents, "setup": "run"},
@@ -195,8 +194,7 @@ def install(repo_path: Path, label: str, default_agent: str, allowed_agents: lis
     metadata = repository_metadata(repo)
     login = login_result.stdout.strip()
     paths = build_paths(metadata["id"])
-    activated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
-    config = build_config(repo, metadata, login, str(Path(orca).resolve()), label, paths, activated_at,
+    config = build_config(repo, metadata, login, str(Path(orca).resolve()), label, paths,
                           default_agent, allowed_agents)
     label_created = ensure_label(metadata["nameWithOwner"], label)
     config_path, plist_path = Path(paths["config"]), Path(paths["plist"])

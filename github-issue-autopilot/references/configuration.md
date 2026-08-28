@@ -34,7 +34,6 @@ Version 2 has this shape:
       "repository_id": "R_kgDOExample",
       "repo_path": "/absolute/path/to/local/clone",
       "author": "@me",
-      "activate_after": "2026-08-27T00:00:00Z",
       "labels": ["agent-ready"]
     }
   ],
@@ -47,7 +46,7 @@ Version 2 has this shape:
 }
 ```
 
-`author` and `activate_after` are required. `@me` resolves through the authenticated GitHub CLI. The activation cutoff is strictly exclusive, so Issues at or before installation never enter the queue. Later poll cursors are inclusive: the watcher safely replays the cursor's whole second, while immutable Issue node IDs make the overlap idempotent. This removes second-boundary gaps without sweeping an old backlog or importing an older Issue after a label edit. `repository_id` is optional but recommended to detect a renamed or transferred repository. Every configured intake label must be present.
+`author` is required, and `@me` resolves through the authenticated GitHub CLI. Every poll scans the current open Issues that match the configured author and all intake labels, including matching Issues created before installation. Immutable Issue node IDs in the SQLite ledger make repeated scans idempotent, so an Issue is queued only once unless the user explicitly retries it. Existing configurations may retain `activate_after` as ignored compatibility metadata. `repository_id` is optional but recommended to detect a renamed or transferred repository.
 
 `max_concurrent_workers` accepts 1–3. Polling records every eligible Issue; the coordinator starts only the available number of Orca workers and fills a free slot on a later cycle. Orca is the source of truth for Task, Dispatch, agent terminal, worktree lineage, comments, and workspace status. SQLite stores immutable Issue node IDs, attempt history, and those Orca IDs for recovery.
 

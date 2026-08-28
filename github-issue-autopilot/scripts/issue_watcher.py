@@ -82,9 +82,8 @@ def load_config(path: Path) -> dict[str, Any]:
             raise WatcherError("every repository must use owner/name")
         if not isinstance(item.get("author"), str) or not item["author"].strip():
             raise WatcherError(f"{item.get('repository')}: author is required")
-        if "activate_after" not in item:
-            raise WatcherError(f"{item['repository']}: activate_after is required")
-        item["activate_after"] = parse_time(str(item["activate_after"]))
+        if "activate_after" in item:
+            item["activate_after"] = parse_time(str(item["activate_after"]))
         item["repo_path"] = expand_path(str(item.get("repo_path", "")), base)
         if not item["repo_path"].is_dir():
             raise WatcherError(f"repo_path is not a directory: {item['repo_path']}")
@@ -211,18 +210,6 @@ class Ledger:
         self.connection.execute(
             "INSERT INTO metadata(key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value),
-        )
-
-    def cursor(self, repository: str, default: dt.datetime) -> dt.datetime:
-        key = f"poll_cursor:{repository.lower()}"
-        row = self.connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
-        return parse_time(row[0]) if row else default
-
-    def advance_cursor(self, repository: str, value: dt.datetime) -> None:
-        key = f"poll_cursor:{repository.lower()}"
-        self.connection.execute(
-            "INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, iso(value)),
         )
 
     def enqueue(self, issue: dict[str, Any]) -> bool:
@@ -773,7 +760,7 @@ def repository_metadata(repository: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-def list_issues(repository: dict[str, Any], login: str, created_after: dt.datetime | None = None,
+def list_issues(repository: dict[str, Any], login: str,
                 created_through: dt.datetime | None = None) -> list[dict[str, Any]]:
     repository_metadata(repository)
     slug = repository["repository"]
@@ -784,14 +771,12 @@ def list_issues(repository: dict[str, Any], login: str, created_after: dt.dateti
         raise WatcherError(result.stderr.strip() or f"failed to list Issues for {slug}")
     values = json.loads(result.stdout)
     labels = set(repository.get("labels", []))
-    activation = repository["activate_after"]
-    lower = created_after or activation
     eligible = []
     for issue in values:
         created = parse_time(issue["createdAt"])
         actual_labels = {item.get("name") for item in issue.get("labels", [])}
         if ((issue.get("author") or {}).get("login", "").lower() == author.lower()
-                and labels.issubset(actual_labels) and created > activation and created >= lower
+                and labels.issubset(actual_labels)
                 and (created_through is None or created <= created_through)):
             issue["repository"] = slug
             eligible.append(issue)
@@ -802,11 +787,9 @@ def poll(config: dict[str, Any], ledger: Ledger) -> dict[str, Any]:
     login, observed, enqueued = github_login(), 0, 0
     for repository in config["repositories"]:
         boundary = now()
-        cursor = ledger.cursor(repository["repository"], repository["activate_after"])
-        for issue in list_issues(repository, login, cursor, boundary):
+        for issue in list_issues(repository, login, created_through=boundary):
             observed += 1
             enqueued += int(ledger.enqueue(issue))
-        ledger.advance_cursor(repository["repository"], boundary)
     return {"observed": observed, "enqueued": enqueued}
 
 
@@ -864,8 +847,8 @@ def prompt_for(run: dict[str, Any], config: dict[str, Any]) -> str:
     return (
         f"Use $github-issue-repair {run['url']} in GitHub Issue Autopilot mode for attempt "
         f"{run['attempt_number']}. Use repair run ID {run['run_id']} and the current Orca-managed worktree and branch. "
-        "The dispatcher verified this newly created open Issue against its repository, "
-        "author, polling window, and labels. Implement one bounded local package at risk no greater than "
+        "The dispatcher verified this open Issue against its repository, "
+        "current open state, author, and labels. Implement one bounded local package at risk no greater than "
         f"{config['policy'].get('max_risk', 'medium')} in the isolated Orca worktree and verify it independently. "
         "Update the active Orca worktree comment at investigation, implementation, and test checkpoints. "
         "Stop on ambiguity, unsafe work, expansion, dependency upgrades, migrations, security/auth/payment changes, "
@@ -940,10 +923,7 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
     repair_run_id = str(uuid.uuid4())
     run["run_id"] = repair_run_id
     try:
-        historical_cutoff = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
-        current = {item["id"]: item for item in list_issues(
-            repository, github_login(), created_after=historical_cutoff
-        )}
+        current = {item["id"]: item for item in list_issues(repository, github_login())}
         issue = current.get(run["node_id"])
         if issue is None:
             ledger.finish(run["node_id"], attempt, "blocked", summary="Issue is no longer open or eligible",

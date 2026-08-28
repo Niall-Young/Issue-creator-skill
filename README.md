@@ -15,7 +15,7 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 
 ### 项目简介
 
-这是一个面向 Agent 开发流程的技能包，包含三个权限独立、可组合的 Skill：`github-issue-handoff` 把仓库上下文和用户意图交接成可执行 Issue；`github-issue-repair` 在隔离 worktree 中修复既有 Issue；`github-issue-autopilot` 自动发现符合本地策略的新 Issue，并在 Orca 中启动可见的 Agent 任务。
+这是一个面向 Agent 开发流程的技能包，包含三个权限独立、可组合的 Skill：`github-issue-handoff` 把仓库上下文和用户意图交接成可执行 Issue；`github-issue-repair` 在隔离 worktree 中修复既有 Issue；`github-issue-autopilot` 自动发现符合本地策略的 open Issue，并在 Orca 中启动可见的 Agent 任务。
 
 从旧版本升级时，请删除运行时中的 `github-issue-creator/` 安装副本，再安装 `github-issue-handoff/`，并把显式调用改为 `$github-issue-handoff`，避免新旧技能同时被发现。
 
@@ -23,7 +23,7 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 
 - `github-issue-handoff`：校验仓库、检索重复项、套用 Feature / Bug / Refactor / Research 模板，通过可执行性门禁后创建并回读中文 Issue。
 - `github-issue-repair`：把 Issue 归一化为工作包，识别依赖、重复、同根因与冲突关系；仓库 URL 默认只做只读分诊。
-- `github-issue-autopilot`：一句话为当前仓库安装本地循环，只领取启用后由当前用户新建且带 `agent-ready` 的 open Issue，并调用 `$github-issue-repair`。
+- `github-issue-autopilot`：一句话为当前仓库安装本地循环，领取由当前用户创建且带 `agent-ready` 的全部 open Issue，包括启用前已创建的积压任务，并调用 `$github-issue-repair`。
 - 修复 worker 使用 Orca 管理的项目子 worktree，不修改用户正在使用的工作树；一次记录全部合格 Issue，最多并发 3 个任务。
 - 独立 reviewer 核对验收标准、验证证据、范围漂移和测试弱化。
 - 双层账本以 Issue node ID 防止重复派单，并为每次 attempt 记录所选 Agent、Orca Task/Dispatch/worktree、分支、base/head SHA 和结果。
@@ -90,8 +90,8 @@ $github-issue-repair https://github.com/owner/repo/issues/123
 
 - 三个 Skill 的 `agents/openai.yaml` 提供 OpenAI 兼容 Agent 的界面配置并允许自动发现；技能发现本身不构成修改代码或远程写入授权。
 - `github-issue-repair/scripts/run_state.py` 使用 Python 标准库，在仓库 Git 公共目录中维护运行账本，无需额外依赖。
-- `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、检查、停用、验收或重做仓库循环；`issue_watcher.py` 负责新 Issue 游标、最多三任务领取、Orca 调度、attempt 账本和 Git 证据回读，远程发布策略固定为 `never`。
-- 管理员级 `doctor` 同时检查 watcher、LaunchAgent plist 配置和 `launchctl` 加载状态，全程只读并返回可诊断字段。轮询会安全重读游标所在的整秒，再由不可变 Issue node ID 去重；安装激活边界仍采用严格排除，旧 Issue 不会因此进入队列。
+- `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、检查、停用、验收或重做仓库循环；`issue_watcher.py` 负责全部合格 open Issue 的扫描、最多三任务领取、Orca 调度、attempt 账本和 Git 证据回读，远程发布策略固定为 `never`。
+- 管理员级 `doctor` 同时检查 watcher、LaunchAgent plist 配置和 `launchctl` 加载状态，全程只读并返回可诊断字段。每轮扫描包含启用前已创建但当前仍符合作者与标签策略的 open Issue，再由不可变 Issue node ID 去重，避免漏单和重复派单。
 
 ### 项目结构
 
@@ -150,7 +150,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 
 ### Overview
 
-This package contains three composable Skills with separate permission surfaces. `github-issue-handoff` turns repository context and user intent into an executable Issue. `github-issue-repair` repairs existing Issues in isolated worktrees. `github-issue-autopilot` discovers eligible new Issues and starts visible Agent tasks in Orca.
+This package contains three composable Skills with separate permission surfaces. `github-issue-handoff` turns repository context and user intent into an executable Issue. `github-issue-repair` repairs existing Issues in isolated worktrees. `github-issue-autopilot` discovers eligible open Issues and starts visible Agent tasks in Orca.
 
 When upgrading, remove the installed `github-issue-creator/` copy before installing `github-issue-handoff/`, and update explicit invocations to `$github-issue-handoff` so runtimes do not discover both skills.
 
@@ -158,7 +158,7 @@ When upgrading, remove the installed `github-issue-creator/` copy before install
 
 - `github-issue-handoff` validates repositories, detects duplicates, applies Feature / Bug / Refactor / Research templates, and creates a Chinese Issue only after its executability gate passes.
 - `github-issue-repair` normalizes Issues into work packages and models dependencies, duplicates, shared root causes, and conflicts; repository URLs default to read-only triage.
-- `github-issue-autopilot` installs a local loop with one request, claims only newly created open Issues by the current user carrying `agent-ready`, and invokes `$github-issue-repair`.
+- `github-issue-autopilot` installs a local loop with one request, claims every open Issue created by the current user carrying `agent-ready`, including eligible backlog created before activation, and invokes `$github-issue-repair`.
 - Repair workers use Orca-managed child worktrees and never edit the user's active tree. Every eligible Issue is recorded, with at most three tasks running concurrently.
 - An independent reviewer checks acceptance criteria, verification evidence, scope drift, and weakened tests.
 - A two-level ledger deduplicates immutable Issue node IDs and records every attempt's selected Agent, Orca Task/Dispatch/worktree, branch, base/head SHAs, and outcome.
@@ -225,8 +225,8 @@ In any macOS GitHub checkout, ask the Agent to “build an Issue loop.” Autopi
 
 - Each Skill's `agents/openai.yaml` provides OpenAI-compatible UI metadata and allows automatic discovery. Skill discovery is not authorization to edit code or write remotely.
 - `github-issue-repair/scripts/run_state.py` uses only the Python standard library and stores its ledger under the repository's common Git directory.
-- `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, checks, stops, accepts, or retries a repository loop. `issue_watcher.py` owns the new-Issue cursor, three-slot claims, Orca dispatch, attempt history, and Git evidence readback; remote publication remains fixed to `never`.
-- Administrator-level `doctor` checks the watcher, LaunchAgent plist configuration, and `launchctl` load state without mutating them, returning diagnostic fields for each layer. Polling safely replays the cursor's whole second and relies on immutable Issue node IDs for deduplication, while the installation activation boundary remains strictly exclusive so older Issues stay out of the queue.
+- `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, checks, stops, accepts, or retries a repository loop. `issue_watcher.py` owns full eligible-open-Issue scans, three-slot claims, Orca dispatch, attempt history, and Git evidence readback; remote publication remains fixed to `never`.
+- Administrator-level `doctor` checks the watcher, LaunchAgent plist configuration, and `launchctl` load state without mutating them, returning diagnostic fields for each layer. Every poll includes older open Issues that still match the author and label policy, then relies on immutable Issue node IDs to prevent duplicate dispatch.
 
 ### Project Structure
 

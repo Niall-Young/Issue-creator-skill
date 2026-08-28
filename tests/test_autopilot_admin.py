@@ -65,12 +65,13 @@ class AutopilotAdminTests(unittest.TestCase):
         paths = {"database": self.root / "state.sqlite3"}
         value = ADMIN.build_config(
             self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
-            "agent-ready", paths, "2026-08-28T00:00:00+00:00", "claude", ["claude", "codex"],
+            "agent-ready", paths, "claude", ["claude", "codex"],
         )
         self.assertEqual(["agent-ready"], value["repositories"][0]["labels"])
         self.assertEqual("never", value["policy"]["publication"])
         self.assertEqual("claude", value["orca"]["default_agent"])
         self.assertEqual(["claude", "codex"], value["orca"]["allowed_agents"])
+        self.assertNotIn("activate_after", value["repositories"][0])
         self.assertNotIn("executor", value)
 
     def test_github_command_retries_transient_eof(self) -> None:
